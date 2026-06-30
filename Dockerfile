@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Clone the elbencho repository at the specified version
 WORKDIR /src
-ARG ELBENCHO_VERSION=3.1.5
+ARG ELBENCHO_VERSION=3.1-5
 RUN git clone --depth 1 --branch v${ELBENCHO_VERSION} https://github.com/breuner/elbencho.git .
 
 # Build elbencho
