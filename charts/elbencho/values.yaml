@@ -1,0 +1,107 @@
+# Default values for elbencho.
+# This is a YAML-formatted file.
+
+# -- Number of replica pods to deploy (used in 'standalone' and 'service' modes)
+replicaCount: 1
+
+image:
+  # -- Docker repository for the elbencho image
+  repository: rafmoshe2500/elbencho
+  # -- Image pull policy
+  pullPolicy: IfNotPresent
+  # -- Overrides the image tag (defaults to the chart appVersion)
+  tag: "3.1.5"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# -- Operating mode for elbencho.
+# Options:
+#   - 'standalone': Deploys a pod that sleeps (tail -f /dev/null) allowing you to execute interactive commands inside the container.
+#   - 'service': Runs elbencho as a daemon listener (`elbencho --service`) in a StatefulSet, enabling multi-node distributed benchmarking.
+#   - 'job': Runs a one-time Kubernetes Job executing a pre-defined benchmark command and then terminates.
+mode: standalone
+
+# -- Command and arguments to run when mode is 'job'
+job:
+  # -- Args passed to the elbencho CLI inside the Job.
+  # For example: ["-t", "4", "-s", "1g", "-b", "1m", "-w", "/data"]
+  # This runs a write benchmark with 4 threads, 1GB file size, and 1MB block size on /data.
+  args:
+    - "-t"
+    - "4"
+    - "-s"
+    - "1g"
+    - "-b"
+    - "1m"
+    - "-w"
+    - "/data"
+
+# -- Command and arguments to run when mode is 'standalone'.
+# By default, sleeps forever so you can run benchmarks interactively.
+standalone:
+  command: ["tail", "-f", "/dev/null"]
+  args: []
+
+# -- Command and arguments to run when mode is 'service'.
+# By default, runs as a daemon service on port 27123.
+serviceMode:
+  command: ["/usr/local/bin/elbencho"]
+  args: ["--service"]
+
+# -- Configuration for storage persistence
+persistence:
+  # -- If true, a volume is mounted to the pod
+  enabled: true
+  # -- If set, mounts an existing PVC with this name
+  existingClaim: ""
+  # -- If true (and existingClaim is empty), dynamically creates a new PVC
+  create: true
+  # -- Storage Class to use for the new PVC (omit to use default storage class)
+  storageClass: ""
+  # -- Access modes for the PVC
+  accessModes:
+    - ReadWriteOnce
+  # -- Size of the PVC to create
+  size: 10Gi
+  # -- Mount path inside the container where elbencho will run tests
+  mountPath: /data
+  # -- Name of the volume
+  volumeName: elbencho-storage
+
+# -- Kubernetes Service configuration (used when mode is 'service')
+service:
+  type: ClusterIP
+  port: 27123
+
+# -- Resource limits and requests for the elbencho container
+resources: {}
+  # limits:
+  #   cpu: 100m
+  #   memory: 128Mi
+  # requests:
+  #   cpu: 100m
+  #   memory: 128Mi
+
+# -- Node selector configuration
+nodeSelector: {}
+
+# -- Tolerations configuration
+tolerations: []
+
+# -- Affinity configuration
+affinity: {}
+
+# -- Security context for the pod
+podSecurityContext: {}
+  # fsGroup: 2000
+
+# -- Security context for the elbencho container
+securityContext: {}
+  # capabilities:
+  #   drop:
+  #   - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000

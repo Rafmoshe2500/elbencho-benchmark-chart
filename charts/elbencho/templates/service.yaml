@@ -1,0 +1,17 @@
+{{- if eq .Values.mode "service" -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "elbencho.fullname" . }}
+  labels:
+    {{- include "elbencho.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: service-port
+      protocol: TCP
+      name: service-port
+  selector:
+    {{- include "elbencho.selectorLabels" . | nindent 4 }}
+{{- end }}
