@@ -23,14 +23,14 @@ To build the Docker image locally and push it to your Docker Hub account:
    ```
 
 3. **Build the image**:
-   Use Docker to compile `elbencho` (v3.1.5) and package the final minimal image:
+   Use Docker to compile `elbencho` (v3.1-5) and package the final minimal image:
    ```bash
-   docker build -t rafmoshe2500/elbencho:3.1.5 .
+   docker build -t rafmoshe2500/elbencho:3.1-5 .
    ```
 
 4. **Push the image to Docker Hub**:
    ```bash
-   docker push rafmoshe2500/elbencho:3.1.5
+   docker push rafmoshe2500/elbencho:3.1-5
    ```
 
 ---
@@ -133,3 +133,50 @@ After deploying in `standalone` mode, you can run benchmarks interactively by ex
    ```bash
    elbencho -t 4 -s 10G -b 1M -r /data
    ```
+
+---
+
+## 5. Running Distributed Benchmarks (StatefulSet Mode)
+
+When deployed in `service` mode (which spins up a `StatefulSet`), each pod runs as an `elbencho` service daemon listening on port 27123. This setup allows you to execute coordinated, parallel benchmarks across multiple nodes.
+
+### Step-by-Step Guide
+
+1. **Deploy the chart in `service` mode**:
+   Make sure you have replicas deployed (e.g., 3 replicas):
+   ```bash
+   helm install elbencho-cluster ./charts/elbencho \
+     --set mode=service \
+     --set replicaCount=3 \
+     --set persistence.size=10Gi
+   ```
+
+2. **Understand the Hostnames**:
+   Because we use a headless service for DNS resolution in the StatefulSet, each pod gets a predictable, addressable hostname in the cluster:
+   - `elbencho-cluster-0.elbencho-cluster`
+   - `elbencho-cluster-1.elbencho-cluster`
+   - `elbencho-cluster-2.elbencho-cluster`
+
+3. **Exec into the first pod (which will act as the coordinator)**:
+   ```bash
+   kubectl exec -it elbencho-cluster-0 -- /bin/bash
+   ```
+
+4. **Run the distributed benchmark**:
+   Execute the `elbencho` command from the coordinator pod, pointing to the hosts of all daemon instances using the `--hosts` parameter. 
+   
+   Example (runs a write test using all 3 instances in parallel, with 4 threads per host writing a 5G file each to their respective local `/data` mount):
+   ```bash
+   elbencho --hosts elbencho-cluster-0.elbencho-cluster,elbencho-cluster-1.elbencho-cluster,elbencho-cluster-2.elbencho-cluster \
+     -t 4 -s 5G -b 1M -w /data
+   ```
+
+5. **Run a read test**:
+   ```bash
+   elbencho --hosts elbencho-cluster-0.elbencho-cluster,elbencho-cluster-1.elbencho-cluster,elbencho-cluster-2.elbencho-cluster \
+     -t 4 -s 5G -b 1M -r /data
+   ```
+
+> [!NOTE]
+> Since we use `volumeClaimTemplates` in `service` mode, each pod in the StatefulSet mounts its own private dynamic PVC. The `--hosts` parameter will make each pod execute write/read operations on its own local `/data` path, allowing you to measure the combined throughput and IOPS of all mounted disks simultaneously!
+
