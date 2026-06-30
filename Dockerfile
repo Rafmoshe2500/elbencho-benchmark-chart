@@ -1,59 +1,29 @@
 # ==========================================
-# Stage 1: Build elbencho from source
+# Stage 1: Download the official static binary
 # ==========================================
-FROM ubuntu:22.04 AS builder
+FROM alpine:3.19 AS downloader
 
-ENV DEBIAN_FRONTEND=noninteractive
+RUN apk add --no-cache curl tar
 
-# Install dependencies required for compilation
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    cmake \
-    git \
-    libaio-dev \
-    libboost-filesystem-dev \
-    libboost-program-options-dev \
-    libboost-thread-dev \
-    libcurl4-openssl-dev \
-    libnuma-dev \
-    libssl-dev \
-    uuid-dev \
-    zlib1g-dev \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Clone the elbencho repository at the specified version
-WORKDIR /src
 ARG ELBENCHO_VERSION=3.1-5
-RUN git clone --depth 1 --branch v${ELBENCHO_VERSION} https://github.com/breuner/elbencho.git .
 
-# Build elbencho
-# NCURSES_SUPPORT=0 is used because interactive dashboard features are not required in containers.
-RUN make NCURSES_SUPPORT=0 -j$(nproc)
+# Download and extract the official pre-compiled static executable
+RUN curl -L -o elbencho.tar.gz https://github.com/breuner/elbencho/releases/download/v${ELBENCHO_VERSION}/elbencho-static-x86_64.tar.gz \
+    && tar -xzf elbencho.tar.gz \
+    && chmod +x elbencho
 
 # ==========================================
-# Stage 2: Create the minimal runtime image
+# Stage 2: Create the minimal final image
 # ==========================================
 FROM ubuntu:22.04
 
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Install runtime shared libraries required by the compiled binary
+# Install basic runtime packages (no boost/libaio needed for static binary)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libaio1 \
-    libboost-filesystem1.74.0 \
-    libboost-program-options1.74.0 \
-    libboost-thread1.74.0 \
-    libcurl4 \
-    libnuma1 \
-    libssl3 \
-    uuid-runtime \
-    zlib1g \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the compiled binary from the builder stage
-COPY --from=builder /src/bin/elbencho /usr/local/bin/elbencho
+# Copy the static binary from the downloader stage
+COPY --from=downloader /elbencho /usr/local/bin/elbencho
 
 # Set entrypoint to elbencho
 ENTRYPOINT ["/usr/local/bin/elbencho"]
