@@ -28,10 +28,8 @@ ARG ELBENCHO_VERSION=3.1-5
 RUN git clone --depth 1 --branch v${ELBENCHO_VERSION} https://github.com/breuner/elbencho.git .
 
 # Build elbencho
-# NCURSES_SUPPORT=OFF is used because interactive dashboard features are not required in containers.
-RUN mkdir build && cd build && \
-    cmake -DNCURSES_SUPPORT=OFF .. && \
-    make -j$(nproc)
+# NCURSES_SUPPORT=0 is used because interactive dashboard features are not required in containers.
+RUN make NCURSES_SUPPORT=0 -j$(nproc)
 
 # ==========================================
 # Stage 2: Create the minimal runtime image
@@ -55,7 +53,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the compiled binary from the builder stage
-COPY --from=builder /src/build/elbencho /usr/local/bin/elbencho
+COPY --from=builder /src/bin/elbencho /usr/local/bin/elbencho
 
 # Set entrypoint to elbencho
 ENTRYPOINT ["/usr/local/bin/elbencho"]
