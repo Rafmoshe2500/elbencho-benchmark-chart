@@ -1,0 +1,16 @@
+mode: job
+image:
+  tag: "3.1-5"
+persistence:
+  existingClaim: "local-pvc"
+job:
+  args:
+    - "-t"
+    - "1"
+    - "-s"
+    - "100m"
+    - "-b"
+    - "128k"
+    - "-w"
+    - "/data"
+    - "--mkdirs"
