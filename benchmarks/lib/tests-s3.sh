@@ -11,17 +11,37 @@
 : "${TPUT_OBJECTS:=4}"        # throughput tests: objects per thread
 : "${MIX_OBJECTS:=20000}"     # mix tests: objects in the mixed-size dataset (all daemons)
 : "${META_FILES:=2000}"       # test 11: objects per thread
+: "${RANGE_OBJ_SIZE:=256m}"   # test 16: size of the large objects (e.g. Parquet/ORC files)
+: "${RANGE_OBJECTS:=4}"       # test 16: large objects per thread
+: "${RANGE_BS:=64k:1,1m:2,8m:1}"  # test 16: size of every ranged GET (footer reads + column chunks)
+
+dataset_bytes() {
+  case "$TEST" in
+    01|02|08|09) echo $(( OBJECTS * THREADS * PODS * $(to_bytes "$OBJ_SIZE") )) ;;
+    03|04)       echo $(( TPUT_OBJECTS * THREADS * PODS * $(to_bytes "$TPUT_OBJ_SIZE") )) ;;
+    05|06|07)    echo $(( MIX_OBJECTS * $(mix_avg "$BS_MIX") )) ;;
+    10)          echo $(( 1000 * PODS * $(to_bytes "$BS") )) ;;
+    16)          echo $(( RANGE_OBJECTS * THREADS * PODS * $(to_bytes "$RANGE_OBJ_SIZE") )) ;;
+    *)           echo 0 ;;
+  esac
+}
+dataset_hint() {
+  case "$TEST" in
+    01|02|08|09) echo "Raise OBJECTS (objects per thread) or OBJ_SIZE." ;;
+    03|04)       echo "Raise TPUT_OBJECTS or TPUT_OBJ_SIZE." ;;
+    05|06|07)    echo "Raise MIX_OBJECTS." ;;
+    16)          echo "Raise RANGE_OBJECTS or RANGE_OBJ_SIZE." ;;
+    *)           echo "Make the dataset larger." ;;
+  esac
+}
 
 if [ "$LAYOUT" = single ]; then BUCKETS_PATH="$BUCKET_PREFIX-single"
 else BUCKETS_PATH="$BUCKET_PREFIX-[1-$BUCKETS]"; fi
 TIMED=(--timelimit "$DURATION" --infloop)
 IOPS_DS=(-n 1 -N "$OBJECTS" -s "$OBJ_SIZE" -b "$OBJ_SIZE" --s3objprefix iops/)
 
-mkbuckets() {
-  local sig="$BUCKETS_PATH"
-  need_prepare "buckets-$LAYOUT" "$sig" || return 0
+mkbuckets() {   # always (idempotent, cheap): buckets may have been deleted outside of this suite
   eb mkbuckets 0 ELBENCHO_HOSTS -d -t 1 "$BUCKETS_PATH"
-  ds_set "buckets-$LAYOUT" "$sig"
 }
 
 prepare_iops() {
@@ -70,7 +90,7 @@ mix_test() {
   rd=$(eb_cmd mix-read 1 ELBENCHO_HOSTS -r --s3fastget -t "$rt" --treefile "$tree" -b "$maxb" --s3objprefix "$prefix/r/" "${TIMED[@]}" --start '$S' "$BUCKETS_PATH")
   wr=$(eb_cmd mix-write 1 ELBENCHO_HOSTS_2 -w -t "$wt" --treefile "$tree" -b "$maxb" --s3objprefix "$prefix/w/" "${TIMED[@]}" --start '$S' "$BUCKETS_PATH")
   rd=${rd//\\\$S/\$S}; wr=${wr//\\\$S/\$S}   # let the remote shell expand the common start time
-  ctl "S=\$((\$(date +%s)+5)); ($rd) > $REMOTE_DIR/mix-read.log 2>&1 & ($wr) > $REMOTE_DIR/mix-write.log 2>&1 &
+  ctl_run "S=\$((\$(date +%s)+5)); ($rd) > $REMOTE_DIR/mix-read.log 2>&1 & ($wr) > $REMOTE_DIR/mix-write.log 2>&1 &
        st=0; for j in \$(jobs -p); do wait \$j || st=1; done; cat $REMOTE_DIR/mix-read.log $REMOTE_DIR/mix-write.log; exit \$st" \
     2>&1 | tee -a "$RUN_DIR/console.log"
 }
@@ -95,6 +115,17 @@ run_test() {
     10)    local l=(-t 1 -n 1 -N 1000 -s "$BS" -b "$BS" --s3objprefix lat/)
            eb lat-put 1 ELBENCHO_HOSTS -w "${l[@]}" "${TIMED[@]}" "$BUCKETS_PATH"
            eb lat-get 1 ELBENCHO_HOSTS -r --s3fastget "${l[@]}" "${TIMED[@]}" "$BUCKETS_PATH" ;;
+    16)    # random byte-range GETs inside large objects (analytics engines reading Parquet/ORC)
+           local r=(-n 1 -N "$RANGE_OBJECTS" -s "$RANGE_OBJ_SIZE" --s3objprefix range/)
+           local sig="$BUCKETS_PATH,obj=$RANGE_OBJ_SIZE,n=$RANGE_OBJECTS,t=$THREADS,pods=$PODS"
+           if need_prepare range "$sig"; then
+             log "preparing $((RANGE_OBJECTS*THREADS*PODS)) objects of $RANGE_OBJ_SIZE"
+             eb prepare 0 ELBENCHO_HOSTS -w -t "$THREADS" "${r[@]}" -b 16m "$BUCKETS_PATH"
+             ds_set range "$sig"
+           fi
+           log "random ranged GETs ($RANGE_BS) at random offsets of random objects"
+           eb "$TNAME" 1 ELBENCHO_HOSTS -r --s3randobj --s3fastget -t "$THREADS" --iodepth "$IODEPTH" "${r[@]}" -b "$RANGE_BS" \
+              --randamount "$(( $(dataset_bytes) * 1000 ))" "${TIMED[@]}" "$BUCKETS_PATH" ;;
     11)    local m=(-t "$THREADS" -n 1 -N "$META_FILES" -s 0 --s3objprefix meta/)
            eb meta-create 1 ELBENCHO_HOSTS -w "${m[@]}" "$BUCKETS_PATH"
            eb meta-list   1 ELBENCHO_HOSTS --s3listobjpar "${m[@]}" "$BUCKETS_PATH"

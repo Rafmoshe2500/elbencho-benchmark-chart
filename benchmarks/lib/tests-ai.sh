@@ -10,16 +10,6 @@
 #    -> KV-cache offload: 50/50 read/write of large blocks.
 # Everything lives on one shared target: the NFS export / the bucket <BUCKET_PREFIX>-ai.
 
-to_bytes() { # 4k / 16m / 2g / 1t / plain number -> bytes
-  local v=${1,,} n
-  n=${v%[kmgt]}
-  case "$v" in
-    *k) echo $((n * 1024)) ;; *m) echo $((n * 1048576)) ;;
-    *g) echo $((n * 1073741824)) ;; *t) echo $((n * 1099511627776)) ;; *) echo "$v" ;;
-  esac
-}
-hr() { awk -v b="$1" 'BEGIN{ split("B KiB MiB GiB TiB",u," "); i=1; while (b>=1024 && i<5) { b/=1024; i++ } printf "%.1f %s", b, u[i] }'; }
-
 S3=0; [ "$FAMILY" = s3 ] && S3=1
 if [ $S3 = 1 ]; then AI_BUCKET="$BUCKET_PREFIX-ai"; BASE="$AI_BUCKET"; else BASE=/data; fi
 
@@ -29,24 +19,35 @@ pod_mkdir() { [ $S3 = 1 ] || $K exec "$FULL-0" -c elbencho -- mkdir -p "$@"; }
 # Run two elbencho commands (built with eb_cmd ... --start '$S') so that they start in the same second
 eb_concurrent() {
   local a=${1//\\\$S/\$S} b=${2//\\\$S/\$S}
-  ctl "mkdir -p $REMOTE_DIR; S=\$((\$(date +%s)+5)); ($a) > $REMOTE_DIR/c1.log 2>&1 & ($b) > $REMOTE_DIR/c2.log 2>&1 &
+  ctl_run "S=\$((\$(date +%s)+5)); ($a) > $REMOTE_DIR/c1.log 2>&1 & ($b) > $REMOTE_DIR/c2.log 2>&1 &
        st=0; for j in \$(jobs -p); do wait \$j || st=1; done; cat $REMOTE_DIR/c1.log $REMOTE_DIR/c2.log; rm -f $REMOTE_DIR/c?.log; exit \$st" \
     2>&1 | tee -a "$RUN_DIR/console.log"
 }
 
-ai_mkbucket() { [ $S3 = 1 ] || return 0; need_prepare ai-bucket "$AI_BUCKET" || return 0; eb mkbucket 0 ELBENCHO_HOSTS -d -t 1 "$AI_BUCKET"; ds_set ai-bucket "$AI_BUCKET"; }
+ai_mkbucket() { [ $S3 = 1 ] || return 0; eb mkbucket 0 ELBENCHO_HOSTS -d -t 1 "$AI_BUCKET"; }   # idempotent
 
 # ============================================================== training ====
-train_test() {
-  : "${TRAIN_PRESET:=resnet50}"
-  case "$TRAIN_PRESET" in                       # average sample sizes used by MLPerf Storage
-    resnet50)  : "${TRAIN_SAMPLE_SIZE:=115k}"; : "${TRAIN_SAMPLES:=100000}" ;;
-    cosmoflow) : "${TRAIN_SAMPLE_SIZE:=2867k}"; : "${TRAIN_SAMPLES:=4000}" ;;
-    unet3d)    : "${TRAIN_SAMPLE_SIZE:=147m}"; : "${TRAIN_SAMPLES:=80}" ;;
-    custom)    : "${TRAIN_SAMPLE_SIZE:=1m}"; : "${TRAIN_SAMPLES:=10000}" ;;
-    *) die "TRAIN_PRESET must be resnet50 | cosmoflow | unet3d | custom" ;;
+: "${TRAIN_PRESET:=resnet50}"
+case "$TRAIN_PRESET" in                         # average sample sizes used by MLPerf Storage
+  resnet50)  : "${TRAIN_SAMPLE_SIZE:=115k}"; : "${TRAIN_SAMPLES:=100000}" ;;
+  cosmoflow) : "${TRAIN_SAMPLE_SIZE:=2867k}"; : "${TRAIN_SAMPLES:=4000}" ;;
+  unet3d)    : "${TRAIN_SAMPLE_SIZE:=147m}"; : "${TRAIN_SAMPLES:=80}" ;;
+  custom)    : "${TRAIN_SAMPLE_SIZE:=1m}"; : "${TRAIN_SAMPLES:=10000}" ;;
+  *) die "TRAIN_PRESET must be resnet50 | cosmoflow | unet3d | custom" ;;
+esac
+: "${TRAIN_SIZE_MIX:=}"              # optional weighted sample sizes, e.g. "64k:1,128k:2,256k:1"
+: "${MODEL_SIZE:=16g}"               # (inference) e.g. 8B parameters in bf16 ~ 16 GB
+
+# training: the sample dataset (re-read every epoch); inference: the model (read by every replica)
+dataset_bytes() {
+  case "$TEST" in
+    14) echo $(( TRAIN_SAMPLES * $(mix_avg "${TRAIN_SIZE_MIX:-$TRAIN_SAMPLE_SIZE}") )) ;;
+    15) to_bytes "$MODEL_SIZE" ;;
   esac
-  : "${TRAIN_SIZE_MIX:=}"            # optional weighted sample sizes, e.g. "64k:1,128k:2,256k:1"
+}
+dataset_hint() { if [ "$TEST" = 14 ]; then echo "Raise TRAIN_SAMPLES (MLPerf uses datasets far larger than any cache)."; else echo "For inference a cached model is realistic for repeated loads - CACHE_CHECK=off silences this."; fi; }
+
+train_test() {
   : "${EPOCHS:=3}"
   : "${TRAIN_THREADS:=8}"            # data loader workers per pod
   : "${TRAIN_BS:=$([ $S3 = 1 ] && echo 16m || echo 1m)}"
@@ -118,7 +119,6 @@ train_test() {
 # ============================================================= inference ====
 inference_test() {
   : "${INF_PHASES:=load lookup kvcache}"
-  : "${MODEL_SIZE:=16g}"             # e.g. 8B parameters in bf16 ~ 16 GB
   : "${MODEL_SHARDS:=4}"             # safetensors shards
   : "${LOAD_THREADS:=16}"            # parallel readers per replica (model streamers use 16+)
   : "${LOAD_BS:=$([ $S3 = 1 ] && echo 16m || echo 4m)}"

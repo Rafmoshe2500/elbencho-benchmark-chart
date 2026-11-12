@@ -9,6 +9,12 @@
 : "${PREP_THREADS:=8}"
 
 DEV=/dev/elbencho
+
+dataset_bytes() {   # the tested range of every device
+  local one; one=$(to_bytes "${DEV_SIZE:-$PVC_SIZE}")
+  if [ "$LAYOUT" = multi ]; then echo $(( PODS * one )); else echo "$one"; fi
+}
+dataset_hint() { echo "Raise PVC_SIZE (or DEV_SIZE)$( [ "$LAYOUT" = multi ] && echo ' / PODS')."; }
 SHARE=""; [ "$LAYOUT" = multi ] && SHARE="--nosvcshare"
 SIZE=(); [ -n "$DEV_SIZE" ] && SIZE=(-s "$DEV_SIZE")
 TIMED=(--timelimit "$DURATION" --infloop)

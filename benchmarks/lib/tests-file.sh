@@ -12,6 +12,13 @@
 : "${META_FILES:=1000}"     # test 11: files per dir
 
 PATHS="/data/f[1-$FILES]"
+
+dataset_bytes() {   # what the measured phase works on (metadata test: not relevant)
+  [ "$TEST" = 11 ] && { echo 0; return; }
+  local one=$(( FILES * $(to_bytes "$FILE_SIZE") ))
+  if [ "$LAYOUT" = multi ]; then echo $(( PODS * one )); else echo "$one"; fi
+}
+dataset_hint() { echo "Raise FILE_SIZE / FILES$( [ "$LAYOUT" = multi ] && echo ' / PODS')$( [ "$PROTO" = xfs ] && echo ' (and PVC_SIZE)')."; }
 SHARE=""; [ "$LAYOUT" = multi ] && SHARE="--nosvcshare"
 TIMED=(--timelimit "$DURATION" --infloop)
 

@@ -76,8 +76,10 @@ Arguments win over the environment, and both win over `profile.env` and the test
 | 13 | IODEPTH sweep | runs another test (default 02) for `SWEEP_IODEPTH="1 2 4 8 16 32 64 128"`: IOPS, MiB/s, avg + p99 latency per depth | same | n/a |
 | 14 | AI training | NFS: MLPerf-style epochs over a sample dataset + checkpoint + restore (see below) | n/a | same on S3 |
 | 15 | AI inference | NFS: model load at cold start + lookups + KV-cache offload (see below) | n/a | same on S3 |
+| 16 | Range reads | n/a | n/a | random byte-range GETs (`RANGE_BS`, default `64k:1,1m:2,8m:1`) at random offsets of large objects (`RANGE_OBJ_SIZE`, 256m). This is the Parquet/ORC pattern of Trino/Spark |
 
-Tests 12 and 13 can be combined freely: `SWEEP_PODS`, `SWEEP_NCONNECT` and `SWEEP_IODEPTH` all work in both
+Tests 12 and 13 can be combined freely: `SWEEP_PODS`, `SWEEP_NCONNECT`, `SWEEP_IODEPTH` and the dataset size
+(`SWEEP_FILE_SIZE` for nfs/xfs, `SWEEP_DEV_SIZE` for raw-block, `SWEEP_OBJECTS` for s3) all work in both
 (12 defaults to a pod sweep, 13 to an iodepth sweep at the current `PODS`). The table shows where IOPS stop growing
 while p99 latency keeps rising.
 
@@ -115,6 +117,10 @@ while p99 latency keeps rising.
 | `NAMESPACE` | elbencho-bench | |
 | `IMAGE_REPO` / `IMAGE_TAG` | chart default | e.g. a mirror in an air-gapped cluster |
 | `HELM_ARGS` | – | extra helm args, e.g. `"--set tolerations[0].operator=Exists"` |
+| `STORAGE_CACHE` | – | cache of the **storage system**: controller DRAM/NVRAM + SSD cache, e.g. `512g`. Not the pod's or node's RAM (`--direct` bypasses that). See "Dataset vs. storage cache" |
+| `CACHE_FACTOR` / `CACHE_CHECK` | 2 / warn | required dataset ≥ factor × cache; `warn`, `fail` (stop before deploying) or `off` |
+| `BLOCKVARPCT` | – (elbencho default 100) | content of written data, see "Data reduction" |
+| `DETACH` | 1 | benchmarks run detached in the controller pod and survive a lost connection (VPN/SSH/laptop sleep). Output is polled every `POLL` (5) s, and the runner gives up after `RECONNECT_TIMEOUT` (3600) s offline. Ctrl+C stops the benchmark in the cluster too |
 
 ### NFS ([nfs/profile.env](nfs/profile.env))
 | Key | Default | Meaning |
@@ -147,6 +153,38 @@ while p99 latency keeps rising.
 | `OBJ_SIZE`, `OBJECTS` | 4k, 1000 | IOPS tests: object size, objects per thread |
 | `TPUT_OBJ_SIZE`, `TPUT_OBJECTS` | 256m, 4 | throughput tests |
 | `MIX_OBJECTS` | 20000 | size of the mixed-size dataset (tests 05–07) |
+
+## Dataset vs. storage cache
+
+If the dataset fits into the storage system's cache, you measure the cache, not the disks. Every run prints the
+dataset size of its measured phase. With `STORAGE_CACHE` set, it compares the dataset with the cache: it warns, or
+with `CACHE_CHECK=fail` stops before deploying, when the dataset is smaller than `CACHE_FACTOR` × cache.
+
+To find the cache size:
+- **Vendor arrays:** controller memory of all controllers, plus the SSD cache tier.
+- **Linux NFS server:** its RAM (`free -g`).
+- **Ceph:** `osd_memory_target` × number of OSDs.
+- **MinIO:** the RAM of its nodes.
+- **Cloud disks:** no relevant cache.
+
+Or measure it, by sweeping the dataset size. The point where IOPS drop is where the cache ends:
+
+```bash
+./benchmarks/nfs/12-scaling-sweep.sh NFS_SERVER=... SWEEP_TEST=02 SWEEP_PODS=4 SWEEP_FILE_SIZE="4g 16g 64g 256g"
+```
+
+## Data reduction (`BLOCKVARPCT`)
+
+`BLOCKVARPCT` is applied to every write phase, prepare included. Measured on the written files:
+
+| `BLOCKVARPCT` | compression | dedup | looks like |
+|---|---|---|---|
+| unset (= 100) | 1:1 | none | encrypted / already compressed data: no help from data reduction (worst case) |
+| 50 | ~2:1 | none | typical databases, logs, documents |
+| 0 | 1:1 | very high (one block per thread, repeated) | clones, VM images, backups |
+
+Arrays with inline compression/dedup report very different numbers for the three settings, and the gap shows how
+much the array's data reduction contributes.
 
 ## AI workloads (tests 14, 15)
 
@@ -249,6 +287,8 @@ Files and Google Cloud:
   bucket, so the mixes use the bucket `<BUCKET_PREFIX>-mix`.
 
 ## Caveats
+- **Stale dataset markers.** Datasets are prepared once and marked on the StatefulSet. If the data was deleted outside
+  the suite (bucket emptied, export wiped), reads fail. Run once with `PREPARE=always`.
 - **Raw block tests overwrite the whole device** of every PVC they create.
 - **RWO sharing:** tests 08/09 on XFS or raw block put all pods on the same node (a RWO limit). Use `ACCESS_MODE=ReadWriteMany` with a
   storage that supports multi-node block/filesystem sharing.

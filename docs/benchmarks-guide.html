@@ -316,6 +316,23 @@ footer .wrap { padding-block: 18px; }
         <tr><td class="k">EXTRA_ARGS</td><td class="k">–</td><td>ארגומנטים נוספים ל-elbencho בשלב הנמדד, למשל <code>--cpu</code></td></tr>
         <tr><td class="k">IMAGE_REPO / IMAGE_TAG</td><td class="k">breuner/elbencho · v3.3-3</td><td>למשל mirror בסביבה סגורה</td></tr>
         <tr><td class="k">NAMESPACE / HELM_ARGS</td><td class="k">elbencho-bench / –</td><td>namespace, וארגומנטים נוספים ל-helm (למשל tolerations)</td></tr>
+        <tr><td class="k">STORAGE_CACHE</td><td class="k">–</td><td>ה-cache של מערכת ה-storage (DRAM/NVRAM של הבקרים ו-SSD cache), למשל <code>512g</code>. לא ה-RAM של הפוד</td></tr>
+        <tr><td class="k">CACHE_FACTOR / CACHE_CHECK</td><td class="k">2 / warn</td><td>ה-dataset צריך להיות לפחות פי CACHE_FACTOR מה-cache. warn מזהיר, fail עוצר לפני הפריסה, off מכבה</td></tr>
+        <tr><td class="k">BLOCKVARPCT</td><td class="k">– (100)</td><td>תוכן הנתונים שנכתבים: 100 לא נדחס, 50 נדחס 2:1, 0 כפילויות (dedup)</td></tr>
+        <tr><td class="k">DETACH / POLL</td><td class="k">1 / 5</td><td>הבדיקה רצה מנותקת בתוך ה-controller ושורדת נפילת VPN או SSH. הפלט נמשך כל POLL שניות. Ctrl+C עוצר גם את הבדיקה בקלאסטר</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <div class="block">
+    <h2>Cache וצמצום נתונים</h2>
+    <p>אם ה-dataset נכנס ב-cache של ה-storage, מודדים את ה-cache ולא את הדיסקים. כל ריצה מדפיסה את גודל ה-dataset שלה. עם <code>STORAGE_CACHE</code> היא גם משווה אותו ל-cache, ומזהירה או עוצרת אם הוא קטן מדי. כדי למצוא איפה ה-cache נגמר, מריצים sweep על גודל ה-dataset ומחפשים את הנקודה שבה ה-IOPS צונחים: <code>SWEEP_FILE_SIZE</code> ב-NFS/XFS, <code>SWEEP_DEV_SIZE</code> ב-Block, <code>SWEEP_OBJECTS</code> ב-S3.</p>
+    <div class="tbl"><table>
+      <thead><tr><th>BLOCKVARPCT</th><th>דחיסה</th><th>Dedup</th><th>מדמה</th></tr></thead>
+      <tbody>
+        <tr><td class="k">100 (ברירת מחדל)</td><td>1:1</td><td>אין</td><td>נתונים מוצפנים או דחוסים. המקרה הגרוע ל-data reduction</td></tr>
+        <tr><td class="k">50</td><td>~2:1</td><td>אין</td><td>מסדי נתונים, לוגים, מסמכים</td></tr>
+        <tr><td class="k">0</td><td>1:1</td><td>גבוה מאוד</td><td>שכפולים, VM images, גיבויים</td></tr>
       </tbody>
     </table></div>
   </div>
@@ -326,7 +343,7 @@ footer .wrap { padding-block: 18px; }
       <a class="pcard" href="#nfs" style="--pc: var(--nfs)"><b>NFS</b><span>15 בדיקות, כולל sweep של nconnect ו-iodepth, Training ו-Inference</span></a>
       <a class="pcard" href="#xfs" style="--pc: var(--xfs)"><b>XFS</b><span>13 בדיקות על block storage מפורמט XFS, כולל metadata</span></a>
       <a class="pcard" href="#block" style="--pc: var(--blk)"><b>Block</b><span>12 בדיקות על התקן גולמי, כולל מילוי ראשוני</span></a>
-      <a class="pcard" href="#s3" style="--pc: var(--s3)"><b>S3</b><span>14 בדיקות: אובייקטים קטנים וגדולים, תמהילים, LIST/HEAD, AI</span></a>
+      <a class="pcard" href="#s3" style="--pc: var(--s3)"><b>S3</b><span>15 בדיקות: אובייקטים קטנים וגדולים, תמהילים, range reads, LIST/HEAD, AI</span></a>
     </div>
   </div>
 </section>
@@ -406,6 +423,14 @@ footer .wrap { padding-block: 18px; }
       <div class="run"><h3>תמהיל 70/30 יציב <span class="why">5 דקות, כדי לעבור את ה-cache של השרת</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/05-mix70-32k-128k.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench \
   PODS=4 IODEPTH=16 DURATION=300 FILE_SIZE=16g</pre></div></div>
+
+      <div class="run"><h3>איפה נגמר ה-cache של השרת <span class="why">אותה בדיקה עם dataset שגדל: 128GB עד 8TB בסך הכול</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/12-scaling-sweep.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench \
+  SWEEP_TEST=02 SWEEP_PODS=4 SWEEP_FILE_SIZE="4g 16g 64g 256g" STORAGE_CACHE=512g</pre></div></div>
+
+      <div class="run"><h3>השפעת דחיסה ו-dedup <span class="why">אותה כתיבה עם נתונים רנדומליים מול נתונים שנדחסים 2:1</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/03-write-throughput.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench PODS=4
+./benchmarks/nfs/03-write-throughput.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench PODS=4 BLOCKVARPCT=50</pre></div></div>
 
       <div class="run"><h3>AI Training עם checkpoint ברקע <span class="why">unet3d, 8 צמתים, יעד GPU של 1500 MiB/s לפוד</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/14-ai-training.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench \
@@ -493,6 +518,10 @@ footer .wrap { padding-block: 18px; }
       <div class="run"><h3>volume יחיד תחת עומס <span class="why">4 פודים על PVC אחד באותו צומת</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/xfs/08-single-target-read-iops.sh STORAGE_CLASS=my-xfs-sc PODS=4 PVC_SIZE=200Gi</pre></div></div>
 
+      <div class="run"><h3>איפה נגמר ה-cache <span class="why">גודל קובץ שגדל, עם בדיקה מול ה-cache</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/xfs/12-scaling-sweep.sh STORAGE_CLASS=my-xfs-sc PVC_SIZE=1Ti SWEEP_TEST=02 SWEEP_PODS=4 \
+  SWEEP_FILE_SIZE="4g 16g 64g" STORAGE_CACHE=256g</pre></div></div>
+
       <div class="run"><h3>Latency ו-metadata <span class="why">זמן תגובה של קריאה אחת, ויצירת קבצים</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/xfs/10-latency-qd1.sh STORAGE_CLASS=my-xfs-sc PODS=1 DURATION=120
 ./benchmarks/xfs/11-metadata.sh STORAGE_CLASS=my-xfs-sc PODS=4 META_DIRS=20 META_FILES=5000</pre></div></div>
@@ -569,6 +598,10 @@ footer .wrap { padding-block: 18px; }
       <div class="run"><h3>דיסק גדול, טווח מוגבל <span class="why">בודק 100GB מתוך התקן של 2TB, ומקצר את המילוי</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/raw-block/02-read-iops.sh STORAGE_CLASS=my-block-sc PVC_SIZE=2Ti DEV_SIZE=100g PODS=2</pre></div></div>
 
+      <div class="run"><h3>איפה נגמר ה-cache <span class="why">טווח נבדק שגדל על אותו דיסק</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/raw-block/12-scaling-sweep.sh STORAGE_CLASS=my-block-sc PVC_SIZE=2Ti SWEEP_TEST=02 SWEEP_PODS=4 \
+  SWEEP_DEV_SIZE="32g 128g 512g" STORAGE_CACHE=256g</pre></div></div>
+
       <div class="run"><h3>Latency של קריאה אחת <span class="why">פוד אחד, QD1, שתי דקות</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/raw-block/10-latency-qd1.sh STORAGE_CLASS=my-block-sc PODS=1 DURATION=120</pre></div></div>
     </div>
@@ -623,6 +656,7 @@ kubectl -n elbencho-bench create secret generic s3-creds \
         <tr><td class="n">12</td><td>Scaling sweep</td><td>1→8 פודים</td><td><span class="tag">SWEEP_PODS</span></td><td class="args">SWEEP_TEST SWEEP_PODS</td></tr>
         <tr><td class="n">14</td><td>AI Training</td><td>epochs בסדר אקראי, checkpoint, restore</td><td><span class="tag">resnet50 · 16m reads</span></td><td class="args">--treefile --treerand --s3fastget</td></tr>
         <tr><td class="n">15</td><td>AI Inference</td><td>טעינת מודל, lookups, KV-cache</td><td><span class="tag">16g model · 16m ranges</span></td><td class="args">--nosvcshare -r · --rwmixthr</td></tr>
+        <tr><td class="n">16</td><td>Range reads</td><td>GETs של טווחים במיקומים רנדומליים בתוך אובייקטים גדולים (Parquet/ORC ב-Trino/Spark)</td><td><span class="tag">256m objects · 64k:1,1m:2,8m:1</span></td><td class="args">-r --s3randobj -b RANGE_BS</td></tr>
       </tbody>
     </table></div>
     <p>בדיקה 13 (IODEPTH sweep) לא קיימת ב-S3: שם המקביליות באה ממספר ה-threads, ובדיקה 12 עם <code>THREADS</code> שונים עונה על השאלה הזו.</p>
@@ -659,6 +693,10 @@ kubectl -n elbencho-bench create secret generic s3-creds \
       <div class="run"><h3>גדילה עם פודים <span class="why">GET של אובייקטים קטנים עם 1, 2, 4, 8 ו-16 פודים</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/s3/12-scaling-sweep.sh S3_ENDPOINT=http://minio.minio.svc:9000 S3_SECRET_NAME=s3-creds \
   SWEEP_TEST=02 SWEEP_PODS="1 2 4 8 16"</pre></div></div>
+
+      <div class="run"><h3>קריאות טווח כמו מנוע אנליטיקה <span class="why">קבצי Parquet של 512MB, footer ו-column chunks</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/s3/16-range-read.sh S3_ENDPOINT=http://minio.minio.svc:9000 S3_SECRET_NAME=s3-creds \
+  PODS=8 THREADS=32 RANGE_OBJ_SIZE=512m RANGE_BS="64k:1,1m:2,8m:1"</pre></div></div>
 
       <div class="run"><h3>AI Training על S3 <span class="why">cosmoflow, checkpoint של 16GB לפוד</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/s3/14-ai-training.sh S3_ENDPOINT=http://minio.minio.svc:9000 S3_SECRET_NAME=s3-creds \

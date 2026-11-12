@@ -2,7 +2,7 @@
 # elbencho benchmark runner.
 #   usage: run.sh <protocol> <test-id> [KEY=VALUE ...]
 #   protocol: nfs | xfs | raw-block | s3
-#   test-id:  01..12 (see benchmarks/README.md)
+#   test-id:  01..16 (see benchmarks/README.md)
 # All tunables can be given as KEY=VALUE arguments or as environment variables.
 set -euo pipefail
 
@@ -12,6 +12,17 @@ REPO_DIR=$(cd "$BENCH_DIR/.." && pwd)
 log()  { printf '\033[1;34m[bench]\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[1;33m[bench] WARNING:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[bench] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# sizes: 4k / 16m / 2g / 1t / 50Gi / 1TiB / plain bytes -> bytes ; bytes -> "1.5 GiB"
+to_bytes() {
+  local v; v=$(printf "%s" "$1" | tr "A-Z" "a-z"); v=${v%b}; v=${v%i}
+  awk -v v="$v" 'BEGIN{ n=v+0; u=substr(v,length(v)); m=1
+    if(u=="k")m=1024; else if(u=="m")m=1048576; else if(u=="g")m=1073741824; else if(u=="t")m=1099511627776
+    printf "%.0f\n", n*m }'
+}
+hr() { awk -v b="$1" 'BEGIN{ split("B KiB MiB GiB TiB PiB",u," "); i=1; while (b>=1024 && i<6) { b/=1024; i++ } printf "%.1f %s", b, u[i] }'; }
+# average size of a weighted mix "32k:1,64k:2" (or a single size) in bytes
+mix_avg() { local tot=0 w=0 e s n; for e in ${1//,/ }; do s=$(to_bytes "${e%%:*}"); n=${e#*:}; [ "$n" = "$e" ] && n=1; tot=$((tot + s*n)); w=$((w + n)); done; echo $((tot / w)); }
 
 [ $# -ge 2 ] || die "usage: run.sh <nfs|xfs|raw-block|s3> <test-id> [KEY=VALUE ...]"
 PROTO=$1; TEST=$2; shift 2
@@ -44,6 +55,15 @@ command -v helm >/dev/null || die "helm not found"
 : "${HELM_ARGS:=}"             # extra helm args, e.g. "--set tolerations[0].operator=Exists"
 : "${RESULTS_DIR:=$BENCH_DIR/results}"
 : "${WAIT_TIMEOUT:=10m}"
+: "${STORAGE_CACHE:=}"         # cache of the storage system (controllers DRAM/NVRAM + SSD cache), e.g. 512g
+: "${CACHE_FACTOR:=2}"         # the dataset should be at least CACHE_FACTOR x STORAGE_CACHE
+: "${CACHE_CHECK:=warn}"       # warn | fail | off
+: "${BLOCKVARPCT:=}"           # % of every written block refilled with random data (elbencho default 100 =
+                               # incompressible). Lower = compressible/dedupable data, e.g. 50
+: "${DETACH:=1}"               # 1 = benchmarks run detached in the controller pod and survive a lost
+                               #     kubectl connection (VPN/SSH drop); output is polled every POLL s
+: "${POLL:=5}"
+: "${RECONNECT_TIMEOUT:=3600}" # give up after this many seconds without a working connection
 
 # shellcheck disable=SC1090
 source "$BENCH_DIR/$PROTO/profile.env"
@@ -65,12 +85,14 @@ case "$TEST" in
   10) TNAME=latency-qd1 ;;         11) TNAME=metadata ;;
   12) TNAME=scaling-sweep ;;       13) TNAME=iodepth-sweep ;;
   14) TNAME=ai-training ;;         15) TNAME=ai-inference ;;
+  16) TNAME=range-read ;;
   *) die "unknown test id '$TEST'" ;;
 esac
 case "$TEST" in
   11) [ "$FAMILY" != block ] || die "test 11 (metadata) needs a filesystem - not available for raw-block" ;;
   13) [ "$FAMILY" != s3 ] || die "test 13 (iodepth sweep) is for nfs / xfs / raw-block" ;;
   14|15) [ "$PROTO" = nfs ] || [ "$PROTO" = s3 ] || die "tests 14/15 (AI) are for nfs and s3 (shared datasets)" ;;
+  16) [ "$FAMILY" = s3 ] || die "test 16 (range reads in large objects) is for s3" ;;
 esac
 # AI tests: one dataset shared by all pods (like a real training cluster / inference fleet)
 LAYOUT=multi; [[ $TEST == 08 || $TEST == 09 || $TEST == 14 || $TEST == 15 ]] && LAYOUT=single
@@ -93,6 +115,7 @@ if [ "$FAMILY" = s3 ]; then
     01|02|08|09) THREADS=${USER_THREADS:-32}; IODEPTH=${USER_IODEPTH:-1}; BS=${USER_BS:-$OBJ_SIZE} ;;
     03|04)       THREADS=${USER_THREADS:-16}; IODEPTH=${USER_IODEPTH:-1}; BS=${USER_BS:-16m} ;;
     05|06|07)    THREADS=${USER_THREADS:-20} ;;
+    16)          THREADS=${USER_THREADS:-16}; IODEPTH=${USER_IODEPTH:-1} ;;
   esac
 fi
 : "${DURATION:=60}"            # seconds per timed phase
@@ -106,26 +129,34 @@ if [ "$TEST" = 12 ] || [ "$TEST" = 13 ]; then
     : "${SWEEP_TEST:=02}"; : "${SWEEP_PODS:=1 2 4 8}"; : "${SWEEP_IODEPTH:=}"
   fi
   : "${SWEEP_NCONNECT:=}"        # nfs only, e.g. "1 4 8 16"
+  # dataset size (find where the storage cache ends): FILE_SIZE (nfs/xfs), DEV_SIZE (raw-block), OBJECTS (s3)
+  SWEEP_SIZE_VAR=""; SWEEP_SIZES=""
+  for v in FILE_SIZE DEV_SIZE OBJECTS; do
+    sv="SWEEP_$v"; if [ -n "${!sv:-}" ]; then SWEEP_SIZE_VAR=$v; SWEEP_SIZES=${!sv}; fi
+  done
   case "$SWEEP_TEST" in 12|13|14|15) die "SWEEP_TEST must be one of 01..11" ;; esac
   [ -z "$SWEEP_IODEPTH" ] || [ "$SWEEP_TEST" != 10 ] || die "test 10 is fixed at QD1 - sweep another test"
   SWEEP_ID=sweep-$(date +%Y%m%d-%H%M%S)
   for p in $SWEEP_PODS; do
     for n in ${SWEEP_NCONNECT:-_}; do
       for q in ${SWEEP_IODEPTH:-_}; do
-        extra=(PODS="$p" SWEEP_ID="$SWEEP_ID")
-        [ "$n" != _ ] && extra+=(NCONNECT="$n")
-        [ "$q" != _ ] && extra+=(IODEPTH="$q")
-        log "sweep: test $SWEEP_TEST with ${extra[*]}"
-        "$0" "$PROTO" "$SWEEP_TEST" "${extra[@]}" || warn "sweep step failed: ${extra[*]}"
+        for z in ${SWEEP_SIZES:-_}; do
+          extra=(PODS="$p" SWEEP_ID="$SWEEP_ID")
+          [ "$n" != _ ] && extra+=(NCONNECT="$n")
+          [ "$q" != _ ] && extra+=(IODEPTH="$q")
+          [ "$z" != _ ] && extra+=("$SWEEP_SIZE_VAR=$z" CACHE_CHECK=warn)
+          log "sweep: test $SWEEP_TEST with ${extra[*]}"
+          "$0" "$PROTO" "$SWEEP_TEST" "${extra[@]}" || warn "sweep step failed: ${extra[*]}"
+        done
       done
     done
   done
   log "sweep results ($SWEEP_ID):"
   awk -F, -v id="$SWEEP_ID" '
     NR==1 { for (i=1;i<=NF;i++) h[$i]=i
-            printf "%-5s %-8s %-7s %-7s %-7s %-11s %12s %10s %10s %10s %10s\n","pods","nconnect","threads","iodepth","block","operation","total_iops","MiB/s","rdMiB/s","lat_avg_us","p99_us"; next }
+            printf "%-5s %-8s %-7s %-7s %-7s %-10s %-11s %12s %10s %10s %10s %10s\n","pods","nconnect","threads","iodepth","block","dataset","operation","total_iops","MiB/s","rdMiB/s","lat_avg_us","p99_us"; next }
     $(h["sweep_id"])==id && $(h["phase"]) !~ /^(prepare|mkbucket)/ {
-      printf "%-5s %-8s %-7s %-7s %-7s %-11s %12s %10s %10s %10s %10s\n", $(h["pods"]), $(h["nconnect"]), $(h["threads"]), $(h["iodepth"]), $(h["block"]), $(h["operation"]), $(h["total_iops"]), $(h["mib_s"]), $(h["read_mib_s"]), $(h["lat_avg_us"]), $(h["p99_us"]) }' "$RESULTS_DIR/summary.csv"
+      ds=$(h["dataset_gib"]); printf "%-5s %-8s %-7s %-7s %-7s %-10s %-11s %12s %10s %10s %10s %10s\n", $(h["pods"]), $(h["nconnect"]), $(h["threads"]), $(h["iodepth"]), $(h["block"]), (ds==""?"-":ds"G"), $(h["operation"]), $(h["total_iops"]), $(h["mib_s"]), $(h["read_mib_s"]), $(h["lat_avg_us"]), $(h["p99_us"]) }' "$RESULTS_DIR/summary.csv"
   exit 0
 fi
 
@@ -148,7 +179,8 @@ K="kubectl -n $NAMESPACE"
   for v in PROTO TEST TNAME LAYOUT NAMESPACE REL PODS THREADS IODEPTH BS BS_MIX READ_PCT DURATION \
            FILES FILE_SIZE PVC_SIZE STORAGE_CLASS NFS_SERVER NFS_PATH NFS_STORAGE_CLASS NFS_VERS NCONNECT \
            RSIZE WSIZE NFS_EXTRA_OPTS S3_ENDPOINT S3_REGION BUCKET_PREFIX BUCKETS OBJ_SIZE OBJECTS \
-           TPUT_OBJ_SIZE TPUT_OBJECTS MIX_OBJECTS META_DIRS META_FILES EXTRA_ARGS SPREAD CPU MEMORY; do
+           TPUT_OBJ_SIZE TPUT_OBJECTS MIX_OBJECTS META_DIRS META_FILES EXTRA_ARGS SPREAD CPU MEMORY \
+           DEV_SIZE STORAGE_CACHE CACHE_FACTOR BLOCKVARPCT DETACH RANGE_OBJ_SIZE RANGE_OBJECTS RANGE_BS; do
     [ -n "${!v:-}" ] && printf '%s=%q\n' "$v" "${!v}"
   done
 } > "$RUN_DIR/params.env"
@@ -234,6 +266,8 @@ LAT_FLAGS=""; [ "$LAT" = 1 ] && LAT_FLAGS="--lat --latpercent --latpercent9s 2"
 eb_cmd() {
   local name=$1 measured=$2 hv=$3; shift 3
   local extra=""; [ "$measured" = 1 ] && extra="$LAT_FLAGS $EXTRA_ARGS"
+  # data content of every write (prepare included): compressible/dedupable when BLOCKVARPCT < 100
+  if [ -n "$BLOCKVARPCT" ] && [[ " $* " == *" -w "* ]]; then extra="$extra --blockvarpct $BLOCKVARPCT"; fi
   printf 'elbencho %s --hosts "$%s" %s --label %q --csvfile %s/%s.csv --resfile %s/%s.txt %s %s' \
     "$S3_AUTH" "$hv" "$LIVE_FLAGS" "$PROTO/$TEST-$TNAME/$name" "$REMOTE_DIR" "$name" "$REMOTE_DIR" "$name" \
     "$extra" "$(printf '%q ' "$@")"
@@ -241,7 +275,39 @@ eb_cmd() {
 eb() {
   local name=$1
   log "phase '$name': elbencho ${*:4}"
-  ctl "mkdir -p $REMOTE_DIR && $(eb_cmd "$@")" 2>&1 | tee -a "$RUN_DIR/console.log"
+  ctl_run "$(eb_cmd "$@")" 2>&1 | tee -a "$RUN_DIR/console.log"
+}
+
+# Run a shell script in the controller pod and stream its output; returns its exit code.
+# DETACH=1: the script runs detached (setsid/nohup) and its output is polled, so a dropped
+# kubectl connection (VPN, SSH, laptop sleep) does not stop the benchmark - we just reconnect.
+ctl_run() {
+  if [ "$DETACH" != 1 ]; then ctl "mkdir -p $REMOTE_DIR && $1"; return; fi
+  # unique id per call (ctl_run usually runs in a "| tee" subshell, so no shared counter)
+  local d=$REMOTE_DIR id="job-$(date +%s)-$RANDOM$RANDOM" off=0 size rc meta down=0 lost=0
+  # (only the nohup part goes to the background: a backgrounded "cat" would read /dev/null)
+  printf '%s\n' "$1" | $K exec -i "$CTL" -- bash -c "mkdir -p $d && cat > $d/$id.sh && \
+    { nohup setsid bash -c 'echo \$\$ > $d/$id.pid; bash $d/$id.sh > $d/$id.out 2>&1; echo \$? > $d/$id.rc' >/dev/null 2>&1 < /dev/null & }" \
+    || die "could not start the benchmark in the controller pod"
+  [ "$($K exec "$CTL" -- bash -c "wc -c < $d/$id.sh" 2>/dev/null)" -gt 1 ] 2>/dev/null || die "the benchmark script did not reach the controller pod"
+  # Ctrl+C here stops the benchmark in the cluster as well (elbencho interrupts its services)
+  trap "$K exec $CTL -- bash -c 'kill -INT -- -\$(cat $d/$id.pid) 2>/dev/null' >/dev/null 2>&1; exit 130" INT TERM
+  while :; do
+    if meta=$($K exec "$CTL" -- bash -c "echo \$(stat -c %s $d/$id.out 2>/dev/null || echo 0) \$(cat $d/$id.rc 2>/dev/null || echo -)" 2>/dev/null); then
+      [ $lost = 1 ] && log "connection restored - the benchmark kept running in the cluster"
+      lost=0; down=0
+      size=${meta% *}; rc=${meta#* }
+      if [ "$size" -gt "$off" ]; then
+        $K exec "$CTL" -- bash -c "tail -c +$((off + 1)) $d/$id.out | head -c $((size - off))" 2>/dev/null && off=$size
+      fi
+      if [ "$rc" != "-" ] && [ "$off" -ge "$size" ]; then trap - INT TERM; return "$rc"; fi
+    else
+      [ $lost = 0 ] && warn "lost the connection to the cluster - the benchmark keeps running there; retrying every ${POLL}s"
+      lost=1; down=$((down + POLL))
+      [ $down -lt "$RECONNECT_TIMEOUT" ] || die "no connection for ${RECONNECT_TIMEOUT}s - results stay in $CTL:$d"
+    fi
+    sleep "$POLL"
+  done
 }
 fetch() { # copy result files of this run from the controller
   local f
@@ -261,7 +327,7 @@ need_prepare() { # kind signature
 # ---------------------------------------------------------------- summary ---
 summarize() {
   local f out="$RUN_DIR/summary.txt"
-  local hdr="date,protocol,test,layout,pods,nconnect,threads,iodepth,block,phase,operation,iops,read_iops,total_iops,mib_s,read_mib_s,lat_avg_us,read_lat_avg_us,p99_us,read_p99_us,elapsed_ms_last,run_dir,sweep_id"
+  local hdr="date,protocol,test,layout,pods,nconnect,threads,iodepth,block,phase,operation,iops,read_iops,total_iops,mib_s,read_mib_s,lat_avg_us,read_lat_avg_us,p99_us,read_p99_us,elapsed_ms_last,dataset_gib,run_dir,sweep_id"
   if [ -f "$RESULTS_DIR/summary.csv" ] && [ "$(head -1 "$RESULTS_DIR/summary.csv")" != "$hdr" ]; then
     mv "$RESULTS_DIR/summary.csv" "$RESULTS_DIR/summary-old-$RUN_ID.csv"   # older column layout
   fi
@@ -276,7 +342,7 @@ summarize() {
         /IO (wr )?lat % us/ { if (match($0, / 99%<=[0-9]+/)) w[op]=substr($0,RSTART+6,RLENGTH-6) }
         /IO rd lat % us/    { if (match($0, / 99%<=[0-9]+/)) r[op]=substr($0,RSTART+6,RLENGTH-6) }
         END { for (o in w) printf "%s=%s:%s;", o, w[o], r[o] }' "${f%.csv}.txt" 2>/dev/null || true)
-      awk -F, -v phase="$(basename "$f" .csv)" -v sum="$RESULTS_DIR/summary.csv" -v meta="$RUN_ID,$PROTO,$TEST-$TNAME,$LAYOUT,$PODS,${NCONNECT:-}" -v dir="$RUN_DIR" -v sw="${SWEEP_ID:-}" -v p99s="$p99s" '
+      awk -F, -v phase="$(basename "$f" .csv)" -v sum="$RESULTS_DIR/summary.csv" -v meta="$RUN_ID,$PROTO,$TEST-$TNAME,$LAYOUT,$PODS,${NCONNECT:-}" -v dir="$RUN_DIR" -v sw="${SWEEP_ID:-}" -v p99s="$p99s" -v dsg="$(awk -v b="${DATASET_BYTES:-0}" 'BEGIN{ if (b>0) printf "%.1f", b/1073741824 }')" '
         BEGIN { n=split(p99s, a, ";"); for (i=1;i<=n;i++) if (split(a[i], kv, "=")==2) { split(kv[2], wr, ":"); pw[kv[1]]=wr[1]; pr[kv[1]]=wr[2] } }
         NR==1 { for (i=1;i<=NF;i++) h[$i]=i; next }
         # [first] = all workers still running (stonewall). If that phase was too short to measure
@@ -289,7 +355,7 @@ summarize() {
           r=g("rwmix read IOPS [first]"); if (r=="") r=g("rwmix read entries/s [first]")
           tot=iops+r
           printf "%-14s %-10s %12s %12s %12s %10s %10s %11s %11s\n", phase, op, iops, (r==""?"-":r), tot, g("MiB/s [first]"), (r==""?"-":g("rwmix read MiB/s [first]")), g("IO lat us [avg]"), g("rwmix read IO lat us [avg]")
-          printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", meta, g("threads"), g("IO depth"), g("block size"), phase, op, iops, r, tot, g("MiB/s [first]"), g("rwmix read MiB/s [first]"), g("IO lat us [avg]"), g("rwmix read IO lat us [avg]"), pw[op], pr[op], $(h["time ms [last]"]), dir, sw >> sum
+          printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", meta, g("threads"), g("IO depth"), g("block size"), phase, op, iops, r, tot, g("MiB/s [first]"), g("rwmix read MiB/s [first]"), g("IO lat us [avg]"), g("rwmix read IO lat us [avg]"), pw[op], pr[op], $(h["time ms [last]"]), dsg, dir, sw >> sum
         }' "$f"
     done
   } | tee "$out"
@@ -320,6 +386,28 @@ finish() {
 source "$BENCH_DIR/lib/tests-$FAMILY.sh"
 # shellcheck disable=SC1090
 case "$TEST" in 14|15) source "$BENCH_DIR/lib/tests-ai.sh" ;; esac   # overrides run_test
+
+# ------------------------------------------------- dataset vs storage cache ---
+# dataset_bytes (defined by the tests-*.sh file): bytes the measured phase works on, 0 = not relevant
+cache_check() {
+  DATASET_BYTES=$(dataset_bytes 2>/dev/null || echo 0)
+  [ "${DATASET_BYTES:-0}" -gt 0 ] || return 0
+  if [ -z "$STORAGE_CACHE" ] || [ "$CACHE_CHECK" = off ]; then
+    log "dataset of this test: $(hr "$DATASET_BYTES") (set STORAGE_CACHE=<size> to check it against the storage cache)"
+    return 0
+  fi
+  local cache ratio; cache=$(to_bytes "$STORAGE_CACHE")
+  ratio=$(awk -v d="$DATASET_BYTES" -v c="$cache" 'BEGIN{ printf "%.1f", d/c }')
+  if awk -v r="$ratio" -v f="$CACHE_FACTOR" 'BEGIN{ exit !(r < f) }'; then
+    local msg="dataset $(hr "$DATASET_BYTES") is only ${ratio}x the storage cache ($STORAGE_CACHE), wanted >= ${CACHE_FACTOR}x: results will largely come from cache. $(dataset_hint)"
+    [ "$CACHE_CHECK" = fail ] && die "$msg (CACHE_CHECK=warn to run anyway)"
+    warn "$msg"
+  else
+    log "dataset $(hr "$DATASET_BYTES") = ${ratio}x the storage cache ($STORAGE_CACHE) - measures the media, not the cache"
+  fi
+}
+cache_check
+echo "DATASET_BYTES=$DATASET_BYTES" >> "$RUN_DIR/params.env"
 
 deploy
 run_test
