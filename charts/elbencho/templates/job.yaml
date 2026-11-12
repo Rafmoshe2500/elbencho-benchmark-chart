@@ -23,7 +23,7 @@ spec:
       {{- include "elbencho.podCommon" (dict "ctx" . "withClaim" true) | trim | nindent 6 }}
       containers:
         - name: {{ .Chart.Name }}
-          command: ["/usr/local/bin/elbencho"]
+          command: ["elbencho"]
           args:
             {{- with include "elbencho.s3Args" . | trim }}
             {{- . | nindent 12 }}

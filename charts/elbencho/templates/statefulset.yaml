@@ -19,26 +19,29 @@ spec:
     spec:
       {{- include "elbencho.podCommon" (dict "ctx" . "withClaim" (not (include "elbencho.perPodClaims" .))) | trim | nindent 6 }}
       containers:
-        - name: {{ .Chart.Name }}
-          command: ["/usr/local/bin/elbencho"]
+        {{- range $i := until (int (max 1 (int $.Values.serviceMode.instancesPerPod))) }}
+        {{- $port := add (int $.Values.service.port) $i }}
+        - name: {{ $.Chart.Name }}{{ if $i }}-{{ add $i 1 }}{{ end }}
+          command: ["elbencho"]
           args:
             # --foreground is required: without it elbencho daemonizes and the container exits.
             - "--service"
             - "--foreground"
             - "--port"
-            - {{ .Values.service.port | quote }}
-            {{- with .Values.serviceMode.extraArgs }}
+            - {{ $port | quote }}
+            {{- with $.Values.serviceMode.extraArgs }}
             {{- include "elbencho.quoteList" . | trim | nindent 12 }}
             {{- end }}
           ports:
-            - name: service-port
-              containerPort: {{ .Values.service.port }}
+            - name: svc-{{ $port }}
+              containerPort: {{ $port }}
               protocol: TCP
           readinessProbe:
             tcpSocket:
-              port: service-port
+              port: {{ $port }}
             periodSeconds: 5
-          {{- include "elbencho.containerCommon" . | trim | nindent 10 }}
+          {{- include "elbencho.containerCommon" $ | trim | nindent 10 }}
+        {{- end }}
   {{- if include "elbencho.perPodClaims" . }}
   volumeClaimTemplates:
     - metadata:

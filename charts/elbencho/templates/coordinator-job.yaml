@@ -45,7 +45,7 @@ spec:
                 until (exec 3<>/dev/tcp/$h/$p) 2>/dev/null; do sleep 2; done
               done
               echo "all services up, starting benchmark"
-              exec /usr/local/bin/elbencho --hosts "$ELBENCHO_HOSTS" "$@"
+              exec elbencho --hosts "$ELBENCHO_HOSTS" "$@"
             - elbencho-coordinator
           args:
             {{- with include "elbencho.s3Args" . | trim }}

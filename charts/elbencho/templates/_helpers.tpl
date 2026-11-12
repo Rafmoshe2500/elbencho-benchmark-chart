@@ -54,7 +54,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 Image reference
 */}}
 {{- define "elbencho.image" -}}
-{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
+{{ .Values.image.repository }}:{{ .Values.image.tag | default (printf "v%s" .Chart.AppVersion) }}
 {{- end }}
 
 {{/*
@@ -91,7 +91,7 @@ Is a volume attached at all?
 Does each StatefulSet pod get its own PVC (volumeClaimTemplates)?
 */}}
 {{- define "elbencho.perPodClaims" -}}
-{{- if and (eq .Values.mode "service") (has .Values.protocol (list "file" "block")) .Values.persistence.enabled .Values.persistence.create (not .Values.persistence.existingClaim) }}true{{- end }}
+{{- if and (eq .Values.mode "service") (has .Values.protocol (list "file" "block")) .Values.persistence.enabled .Values.persistence.create (not .Values.persistence.existingClaim) (ne (toString .Values.persistence.perPod) "false") }}true{{- end }}
 {{- end }}
 
 {{/*
@@ -132,6 +132,10 @@ Quote a list of args (elbencho args are often numbers)
 Environment variables for the elbencho container
 */}}
 {{- define "elbencho.env" -}}
+- name: POD_NAME
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.name
 {{- if eq .Values.protocol "s3" }}
 {{- with .Values.s3.endpoints }}
 - name: AWS_ENDPOINT_URL
@@ -187,7 +191,9 @@ volumeDevices:
 {{- end }}
 {{- $mounts := list }}
 {{- if and (include "elbencho.hasStorage" .) (ne .Values.protocol "block") }}
-{{- $mounts = append $mounts (dict "name" .Values.persistence.volumeName "mountPath" .Values.persistence.mountPath) }}
+{{- $m := dict "name" .Values.persistence.volumeName "mountPath" .Values.persistence.mountPath }}
+{{- if .Values.persistence.subPathPerPod }}{{ $_ := set $m "subPathExpr" "$(POD_NAME)" }}{{ end }}
+{{- $mounts = append $mounts $m }}
 {{- end }}
 {{- $mounts = concat $mounts .Values.extraVolumeMounts }}
 {{- with $mounts }}
@@ -253,10 +259,19 @@ annotations:
 Comma-separated list of service-mode daemon hosts
 */}}
 {{- define "elbencho.hostList" -}}
-{{- $fn := include "elbencho.fullname" . }}
+{{- include "elbencho.hostListN" (dict "ctx" . "n" 0) }}
+{{- end }}
+
+{{/*
+Host list for service instance n (0-based): port = service.port + n
+*/}}
+{{- define "elbencho.hostListN" -}}
+{{- $ := .ctx }}
+{{- $fn := include "elbencho.fullname" $ }}
+{{- $port := add (int $.Values.service.port) (int .n) }}
 {{- $hosts := list }}
-{{- range $i := until (int .Values.replicaCount) }}
-{{- $hosts = append $hosts (printf "%s-%d.%s:%d" $fn $i $fn (int $.Values.service.port)) }}
+{{- range $i := until (int $.Values.replicaCount) }}
+{{- $hosts = append $hosts (printf "%s-%d.%s:%d" $fn $i $fn (int $port)) }}
 {{- end }}
 {{- join "," $hosts }}
 {{- end }}

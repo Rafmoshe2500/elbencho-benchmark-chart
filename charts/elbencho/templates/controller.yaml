@@ -1,0 +1,50 @@
+{{- if and (eq .Values.mode "service") .Values.serviceMode.controller.enabled }}
+# Idle pod to run `elbencho --hosts ...` from (kubectl exec). No storage attached.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "elbencho.fullname" . }}-ctl
+  labels:
+    {{- include "elbencho.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "elbencho.name" . }}-ctl
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "elbencho.name" . }}-ctl
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: controller
+    spec:
+      terminationGracePeriodSeconds: 5
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: controller
+          image: {{ include "elbencho.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/bash", "-c", "trap 'exit 0' TERM INT; sleep infinity & wait"]
+          env:
+            {{- range $i := until (int (max 1 (int .Values.serviceMode.instancesPerPod))) }}
+            - name: ELBENCHO_HOSTS{{ if $i }}_{{ add $i 1 }}{{ end }}
+              value: {{ include "elbencho.hostListN" (dict "ctx" $ "n" $i) | quote }}
+            {{- end }}
+            {{- $env := include "elbencho.env" . | trim }}
+            {{- if $env }}
+            {{- $env | nindent 12 }}
+            {{- end }}
+{{- end }}

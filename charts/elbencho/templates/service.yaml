@@ -11,10 +11,13 @@ spec:
   # Publish DNS before readiness so the daemons can be resolved as soon as they start
   publishNotReadyAddresses: true
   ports:
-    - port: {{ .Values.service.port }}
-      targetPort: service-port
+    {{- range $i := until (int (max 1 (int .Values.serviceMode.instancesPerPod))) }}
+    {{- $port := add (int $.Values.service.port) $i }}
+    - port: {{ $port }}
+      targetPort: {{ $port }}
       protocol: TCP
-      name: service-port
+      name: svc-{{ $port }}
+    {{- end }}
   selector:
     {{- include "elbencho.selectorLabels" . | nindent 4 }}
 {{- end }}

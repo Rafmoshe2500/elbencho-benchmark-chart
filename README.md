@@ -6,32 +6,21 @@ Elbencho is a modern distributed storage benchmark tool for file systems, object
 
 ---
 
-## 1. Docker Image Build & Push (Local)
+## 1. Container Image
 
-To build the Docker image locally and push it to your Docker Hub account:
+The chart uses the **official elbencho image** published by the elbencho author:
+[`breuner/elbencho`](https://hub.docker.com/r/breuner/elbencho) (amd64 + arm64, Ubuntu based, includes S3 and libaio).
+The default tag is `v<appVersion>` from `Chart.yaml`, currently **`v3.3-3`**. No custom build is needed.
 
-1. **Verify your working directory**:
-   Ensure you are in the root of the project:
-   ```powershell
-   cd C:\elbencho-benchmark-chart
-   ```
+To pin a different version or use a mirror:
 
-2. **Log in to Docker Hub**:
-   Make sure you are authenticated with your account:
-   ```bash
-   docker login
-   ```
+```bash
+helm install bench ./charts/elbencho --set image.repository=my-registry/elbencho --set image.tag=v3.3-3
+```
 
-3. **Build the image**:
-   Use Docker to compile `elbencho` (v3.1-5) and package the final minimal image:
-   ```bash
-   docker build -t rafmoshe2500/elbencho:3.1-5 .
-   ```
-
-4. **Push the image to Docker Hub**:
-   ```bash
-   docker push rafmoshe2500/elbencho:3.1-5
-   ```
+> [!NOTE]
+> Version 3.2.1 or later is required for weighted block-size mixes (`-b 32k:1,64k:1,128k:1`), which
+> the load-test suite in [`benchmarks/`](benchmarks) uses.
 
 ---
 
@@ -94,7 +83,7 @@ helm install s3bench ./charts/elbencho --set mode=job --set protocol=s3 \
 ```
 
 > [!NOTE]
-> elbencho 3.1-5 does **not** read the endpoint from `AWS_ENDPOINT_URL`, even though its help text says
+> elbencho (checked with 3.1-5 and 3.3-3) does **not** read the endpoint from `AWS_ENDPOINT_URL`, even though its help text says
 > it does. The chart passes `--s3endpoints` explicitly in Job and coordinator runs. In `standalone` mode, use
 > the command printed by `helm install` (NOTES). Keep `-b` equal to `-s`, or `-b` at least `5m`: S3 rejects
 > multipart parts smaller than 5 MiB.
@@ -180,7 +169,19 @@ depends on the flags. Tested with 3 daemons:
 
 ---
 
-## 6. Testing the Chart
+## 6. Load-Test Suite
+
+[`benchmarks/`](benchmarks) has ready-made load tests for **NFS, XFS, raw block devices and S3**:
+max IOPS and throughput, 70/30 mixes with different block sizes, single-target tests, QD1 latency,
+metadata and scaling sweeps. Every parameter can be changed per run. See [`benchmarks/README.md`](benchmarks/README.md).
+
+```bash
+./benchmarks/xfs/02-read-iops.sh STORAGE_CLASS=my-xfs-sc PODS=4 THREADS=16 IODEPTH=32
+```
+
+---
+
+## 7. Testing the Chart
 
 ```bash
 tests/render-test.sh    # helm lint + render every mode x protocol + examples (+ server dry-run if a cluster is reachable)
