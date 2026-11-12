@@ -146,7 +146,8 @@ s3:
 # -- Kubernetes Service configuration (service mode). The Service is headless so every daemon gets
 # a stable DNS name: <fullname>-<N>.<fullname>
 service:
-  port: 27123
+  # elbencho default service port: --hosts works without ":port" when this is 1611
+  port: 1611
 
 # -- Extra environment variables for the elbencho container
 extraEnv: []

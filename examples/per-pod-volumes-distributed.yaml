@@ -1,0 +1,20 @@
+# N daemons, each with its OWN PVC mounted at the SAME path (/data), all running together.
+# --nosvcshare: every daemon writes the FULL -s to its own volume (total = replicas x threads... x -s).
+# Without it, a single file path is treated as one shared file split between the hosts.
+mode: service
+protocol: file            # or: block (then use --direct and /dev/elbencho as the path)
+replicaCount: 3
+persistence:
+  create: true            # volumeClaimTemplates -> one PVC per daemon
+  storageClass: ""
+  size: 50Gi
+affinity:                 # one daemon per node
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - topologyKey: kubernetes.io/hostname
+        labelSelector:
+          matchLabels: {app.kubernetes.io/name: elbencho}
+serviceMode:
+  benchmark:
+    enabled: true
+    args: ["--nosvcshare", "-w", "-r", "--direct", "-t", "4", "-s", "20g", "-b", "1m", "/data/testfile"]

@@ -133,7 +133,7 @@ elbencho -r -t 4 -s 10G -b 1M /data/testfile     # read
 
 ## 5. Distributed Benchmarks (Service Mode)
 
-Each StatefulSet pod runs an elbencho daemon on port 27123. A headless Service gives each pod a stable
+Each StatefulSet pod runs an elbencho daemon on port 1611 (elbencho default). A headless Service gives each pod a stable
 DNS name: `<release>-elbencho-N.<release>-elbencho`.
 
 **Automatic**: a coordinator Job waits for all daemons, then runs the benchmark across all of them:
@@ -158,6 +158,25 @@ kubectl exec -it cluster-elbencho-0 -- elbencho \
 > file path (e.g. `/data/testfile`) elbencho treats the file as **shared**: the hosts split the file's offset
 > range between them, and `-s` is the total size, not the size per host. On per-pod PVCs each daemon then holds
 > only its part of the file.
+
+### Which data does each host work on?
+
+All daemons get the same path (`/data/...`, `/dev/elbencho` or a bucket name). What each one does with it
+depends on the flags. Tested with 3 daemons:
+
+| Scenario | Command | Result |
+| :--- | :--- | :--- |
+| Separate PVCs, **every daemon does the full test on its own volume** (file / block) | `--nosvcshare -w -r -s 300m /data/testfile` | each PVC: 300 MiB, total 900 MiB |
+| Separate PVCs, shared-file mode (default) | `-w -r -s 300m /data/testfile` | the hosts split the file: each writes only 100 MiB (its offset range) |
+| Many files/objects (file, NFS, S3) | `-d -w -r -t 2 -n 1 -N 5 /data` or `bucket` | each thread has its own `rN/` dir or prefix: 6 ranks x 5 = 30 files |
+| **S3: all hosts on one bucket**, many objects | `-d -w -r -t 2 -n 1 -N 5 -s 4m -b 4m my-bucket` | 30 objects under `r0/` ... `r5/`, no collisions |
+| **S3: all hosts write the same big objects together** | `--s3mpusharing -w -r -s 60m -b 5m "my-bucket/obj[1-3]"` | 3 objects x 60 MiB, parts uploaded by all hosts |
+| Shared RWX volume (NFS) | `-d -w -r -n .. -N .. /data` | all ranks in the same directory tree, no collisions |
+
+> [!WARNING]
+> Do **not** use `--nosvcshare` on shared storage (one S3 bucket, NFS, RWX). Every host then uses the
+> same names and they overwrite each other. With 3 hosts, the bucket ended up with 10 objects instead of 30.
+> `--nosvcshare` is meant for separate per-pod volumes. See `examples/per-pod-volumes-distributed.yaml`.
 
 ---
 
