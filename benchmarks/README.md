@@ -6,6 +6,9 @@ and the official image `breuner/elbencho:v3.3-3`.
 Each test deploys N elbencho daemons (a StatefulSet) plus a small controller pod, prepares a dataset when needed,
 runs the measured phase from the controller with `elbencho --hosts ...`, and saves the results on your machine.
 
+A visual guide (in Hebrew) with the flow diagram and recommended commands per protocol:
+[`docs/benchmarks-guide.html`](../docs/benchmarks-guide.html).
+
 **Requirements:** `bash`, `kubectl` (pointing at the cluster), `helm`. Nothing else, not even python.
 On Windows, use WSL or Git Bash.
 

@@ -1,0 +1,714 @@
+<title>מדריך בדיקות elbencho</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Assistant:wght@400;600;700&family=Rubik:wght@500;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: a technical field manual. Sticky tab bar on top; each protocol view = intro, settings, test table, recommended runs.
+   Every protocol has its own identity color, used only for its chip, tab underline and section rules. */
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --sunk: #eceff3;
+  --fg: #17202b;
+  --muted: #5a6676;
+  --line: #d7dde5;
+  --accent: #0f6e8c;
+  --code-bg: #101820;
+  --code-fg: #dfe8f1;
+  --code-dim: #8fa3b8;
+  --nfs: #2563c9;
+  --xfs: #1d8a5b;
+  --blk: #c2610c;
+  --s3: #8a3fb8;
+  --warn-bg: #fff4e0;
+  --warn-fg: #7a4a00;
+  --font-text: "Assistant", "Segoe UI", "Arial Hebrew", Arial, sans-serif;
+  --font-head: "Rubik", "Assistant", "Segoe UI", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --pc: var(--accent);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f141a; --surface: #161d25; --sunk: #1d2630; --fg: #e4eaf1; --muted: #9aa8b8; --line: #2a3542;
+    --accent: #4fb3d4; --code-bg: #0a0f14; --code-fg: #dfe8f1; --code-dim: #7d91a6;
+    --nfs: #6b9cf0; --xfs: #4cc28c; --blk: #f0954a; --s3: #c08ae6; --warn-bg: #33270f; --warn-fg: #f3cf8a;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f141a; --surface: #161d25; --sunk: #1d2630; --fg: #e4eaf1; --muted: #9aa8b8; --line: #2a3542;
+  --accent: #4fb3d4; --code-bg: #0a0f14; --code-fg: #dfe8f1; --code-dim: #7d91a6;
+  --nfs: #6b9cf0; --xfs: #4cc28c; --blk: #f0954a; --s3: #c08ae6; --warn-bg: #33270f; --warn-fg: #f3cf8a;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { direction: rtl; }
+body {
+  background: var(--bg); color: var(--fg);
+  font-family: var(--font-text); font-size: 17px; line-height: 1.6;
+}
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--surface); }
+.wrap {
+  max-width: 1080px; margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+h1, h2, h3 { font-family: var(--font-head); text-wrap: balance; line-height: 1.25; margin: 0; }
+h1 { font-size: 1.9rem; }
+h2 { font-size: 1.45rem; }
+h3 { font-size: 1.12rem; }
+p { margin: 0; max-width: 72ch; }
+code, .mono { font-family: var(--font-mono); font-size: 0.86em; direction: ltr; unicode-bidi: isolate; }
+:not(pre) > code { background: var(--sunk); padding: 0.05em 0.35em; border-radius: 4px; direction: ltr; unicode-bidi: isolate; white-space: nowrap; display: inline-block; line-height: 1.35; max-width: 100%; overflow-x: auto; vertical-align: baseline; }
+a { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+/* header + tabs */
+header.top { background: var(--surface); border-bottom: 1px solid var(--line); }
+header.top .wrap { padding-block: 22px 0; display: grid; gap: 6px; }
+.eyebrow { font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.06em; color: var(--muted); direction: ltr; text-align: right; }
+.sub { color: var(--muted); }
+nav.tabs {
+  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5;
+  background: var(--surface); border-bottom: 1px solid var(--line);
+}
+nav.tabs .wrap { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+nav.tabs a {
+  flex: none; text-decoration: none; color: var(--muted); font-family: var(--font-head); font-weight: 500;
+  padding: 12px 16px 10px; border-bottom: 3px solid transparent; display: flex; align-items: center; gap: 8px;
+}
+nav.tabs a:hover { color: var(--fg); }
+nav.tabs a[aria-current="page"] { color: var(--fg); border-bottom-color: var(--tc); }
+nav.tabs a .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--tc); }
+nav.tabs a[data-v="home"] { --tc: var(--accent); }
+nav.tabs a[data-v="nfs"] { --tc: var(--nfs); }
+nav.tabs a[data-v="xfs"] { --tc: var(--xfs); }
+nav.tabs a[data-v="block"] { --tc: var(--blk); }
+nav.tabs a[data-v="s3"] { --tc: var(--s3); }
+
+main .wrap { padding-block: 28px 64px; }
+section.view { display: grid; gap: 34px; }
+section.view[data-v="nfs"] { --pc: var(--nfs); }
+section.view[data-v="xfs"] { --pc: var(--xfs); }
+section.view[data-v="block"] { --pc: var(--blk); }
+section.view[data-v="s3"] { --pc: var(--s3); }
+.block { display: grid; gap: 14px; min-width: 0; }
+.block > h2 { padding-bottom: 8px; border-bottom: 2px solid var(--pc); }
+.lead { display: grid; gap: 10px; }
+.lead h1 { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.chip { font-family: var(--font-mono); font-size: 0.8rem; font-weight: 600; color: #fff; background: var(--pc); padding: 3px 10px; border-radius: 999px; direction: ltr; }
+
+/* tables */
+.tbl { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 0.93rem; }
+th, td { text-align: right; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { background: var(--sunk); font-family: var(--font-head); font-weight: 500; font-size: 0.85rem; color: var(--muted); white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+td.k { font-family: var(--font-mono); font-size: 0.82rem; direction: ltr; text-align: left; white-space: nowrap; }
+td.n { font-family: var(--font-mono); font-weight: 600; color: var(--pc); white-space: nowrap; font-variant-numeric: tabular-nums; }
+td.args { font-family: var(--font-mono); font-size: 0.78rem; direction: ltr; text-align: left; color: var(--muted); min-width: 260px; }
+.tag { font-size: 0.75rem; padding: 1px 7px; border-radius: 4px; background: var(--sunk); color: var(--muted); white-space: nowrap; display: inline-block; direction: ltr; unicode-bidi: isolate; font-family: var(--font-mono); }
+
+/* recommended runs */
+.runs { display: grid; gap: 16px; }
+.run { display: grid; gap: 8px; min-width: 0; }
+.run h3 { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.run h3 .why { font-family: var(--font-text); font-weight: 400; color: var(--muted); font-size: 0.95rem; }
+.code { position: relative; background: var(--code-bg); border-radius: 8px; min-width: 0; }
+.code pre {
+  margin: 0; padding: 14px 16px; padding-right: 16px; padding-left: 72px; overflow-x: auto;
+  color: var(--code-fg); font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.55;
+  direction: ltr; text-align: left; white-space: pre;
+}
+.code pre .c { color: var(--code-dim); }
+.copy {
+  position: absolute; top: 8px; left: 8px; font-family: var(--font-text); font-size: 0.78rem;
+  background: transparent; color: var(--code-dim); border: 1px solid #3a4a5c; border-radius: 6px; padding: 3px 9px; cursor: pointer;
+}
+.copy:hover { color: var(--code-fg); border-color: var(--code-fg); }
+
+.note { background: var(--warn-bg); color: var(--warn-fg); border-radius: 8px; padding: 12px 16px; display: grid; gap: 4px; }
+.note strong { font-family: var(--font-head); font-weight: 500; }
+ul.tight { margin: 0; padding-inline-start: 22px; display: grid; gap: 6px; max-width: 76ch; }
+
+/* ---- flow diagram (home) ---- */
+.flow-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.flow { min-width: 860px; display: grid; grid-template-columns: 1fr 1.25fr 0.8fr; }
+.lane { padding: 14px 14px 18px; display: grid; gap: 10px; align-content: start; border-inline-start: 1px dashed var(--line); }
+.lane:first-child { border-inline-start: 0; }
+.lane-h { font-family: var(--font-head); font-size: 0.8rem; letter-spacing: 0.04em; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; }
+.lane-h span:last-child { font-family: var(--font-mono); direction: ltr; }
+.node { border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; background: var(--bg); display: grid; gap: 2px; position: relative; }
+.node .f { font-family: var(--font-mono); font-size: 0.8rem; font-weight: 600; direction: ltr; text-align: right; }
+.node .d { font-size: 0.85rem; color: var(--muted); line-height: 1.4; }
+.node.hot { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.node .st { position: absolute; top: -9px; left: 10px; font-family: var(--font-mono); font-size: 0.7rem; background: var(--accent); color: var(--surface); border-radius: 999px; padding: 0 7px; }
+.arrow { text-align: center; color: var(--muted); font-size: 0.8rem; line-height: 1; }
+.arrow::before { content: "▼"; display: block; font-size: 0.7rem; }
+.xarrow { font-size: 0.78rem; color: var(--accent); font-family: var(--font-mono); direction: ltr; text-align: center; }
+.store { display: grid; gap: 8px; }
+.store .node { text-align: center; }
+.store .node.p { border-color: var(--pcol); }
+.store .node.p .f { text-align: center; color: var(--pcol); }
+
+ol.steps { margin: 0; padding: 0; list-style: none; display: grid; gap: 0; counter-reset: s; }
+ol.steps li { counter-increment: s; display: grid; grid-template-columns: 38px 1fr; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+ol.steps li:last-child { border-bottom: 0; }
+ol.steps li::before { content: counter(s); font-family: var(--font-mono); font-weight: 600; color: var(--accent); background: var(--sunk); border-radius: 50%; width: 30px; height: 30px; display: grid; place-items: center; font-size: 0.85rem; }
+ol.steps li > div { display: grid; gap: 3px; min-width: 0; }
+ol.steps b { font-family: var(--font-head); font-weight: 500; }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+.pcard { text-decoration: none; color: inherit; border: 1px solid var(--line); border-top: 4px solid var(--pc); background: var(--surface); border-radius: 8px; padding: 14px 16px; display: grid; gap: 6px; }
+.pcard:hover { border-color: var(--pc); }
+.pcard b { font-family: var(--font-head); font-weight: 500; font-size: 1.05rem; }
+.pcard span { color: var(--muted); font-size: 0.92rem; }
+
+.layouts { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.lay { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); padding: 14px 16px; display: grid; gap: 10px; }
+.lay .pods { display: flex; gap: 8px; flex-wrap: wrap; direction: ltr; }
+.pod { font-family: var(--font-mono); font-size: 0.75rem; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; background: var(--bg); display: grid; gap: 4px; justify-items: center; }
+.vol { width: 46px; height: 14px; border-radius: 3px; background: var(--accent); opacity: 0.75; }
+.shared { height: 14px; border-radius: 3px; background: var(--accent); opacity: 0.75; }
+
+footer { color: var(--muted); font-size: 0.85rem; border-top: 1px solid var(--line); }
+footer .wrap { padding-block: 18px; }
+@media (max-width: 560px) {
+  body { font-size: 16px; }
+  h1 { font-size: 1.55rem; }
+  .code pre { padding-left: 16px; padding-top: 40px; }
+}
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+
+<header class="top">
+  <div class="wrap">
+    <div class="eyebrow">elbencho-benchmark-chart / benchmarks · elbencho v3.3-3</div>
+    <h1>מדריך בדיקות elbencho</h1>
+    <p class="sub">איך ריצה עובדת, מה כל בדיקה מודדת, אילו ערכים אפשר לשנות, ואילו פקודות מומלץ להריץ לכל פרוטוקול.</p>
+  </div>
+</header>
+<nav class="tabs" aria-label="עמודים">
+  <div class="wrap">
+    <a href="#home" data-v="home"><span class="dot"></span>ראשי</a>
+    <a href="#nfs" data-v="nfs"><span class="dot"></span>NFS</a>
+    <a href="#xfs" data-v="xfs"><span class="dot"></span>XFS</a>
+    <a href="#block" data-v="block"><span class="dot"></span>Block</a>
+    <a href="#s3" data-v="s3"><span class="dot"></span>S3</a>
+  </div>
+</nav>
+
+<main><div class="wrap">
+
+<!-- ======================================================= HOME ======== -->
+<section class="view" data-v="home" id="v-home">
+  <div class="block">
+    <h2>מה קורה כשמריצים בדיקה</h2>
+    <p>כל בדיקה היא סקריפט קטן בתיקיית הפרוטוקול (למשל <code>xfs/02-read-iops.sh</code>). הוא לא עושה כלום בעצמו: הוא מעביר את הפרוטוקול, מספר הבדיקה והפרמטרים למנוע <code>lib/run.sh</code>, והמנוע עושה את כל השאר. התרשים מראה איפה כל שלב רץ: על המחשב שלך, בקלאסטר, או על ה-storage.</p>
+    <div class="flow-scroll" role="img" aria-label="תרשים זרימה של ריצת בדיקה">
+      <div class="flow">
+        <div class="lane">
+          <div class="lane-h"><span>המחשב שלך</span><span>bash · kubectl · helm</span></div>
+          <div class="node"><span class="st">1</span><div class="f">xfs/02-read-iops.sh PODS=4 …</div><div class="d">סקריפט הבדיקה. רק קורא ל-run.sh</div></div>
+          <div class="arrow">exec</div>
+          <div class="node hot"><span class="st">2</span><div class="f">lib/run.sh</div><div class="d">קורא KEY=VALUE, ברירות מחדל, ובוחר את הבדיקה מהקטלוג</div></div>
+          <div class="arrow">source</div>
+          <div class="node"><span class="st">3</span><div class="f">xfs/profile.env</div><div class="d">ברירות המחדל של הפרוטוקול וה-Helm values שלו</div></div>
+          <div class="arrow">render</div>
+          <div class="node"><span class="st">4</span><div class="f">results/…/values.yaml</div><div class="d">ה-values של הריצה הזו, נשמרים לתיעוד</div></div>
+          <div class="arrow">source</div>
+          <div class="node"><span class="st">6</span><div class="f">lib/tests-file.sh · tests-block.sh · tests-s3.sh · tests-ai.sh</div><div class="d">הגדרת הבדיקה: אילו פקודות elbencho, ומתי צריך להכין נתונים</div></div>
+          <div class="arrow">fetch</div>
+          <div class="node hot"><span class="st">9</span><div class="f">results/&lt;proto&gt;/&lt;test&gt;/&lt;time&gt;/</div><div class="d">summary.txt, CSV לכל שלב, console.log, params.env. כל ריצה נוספת גם ל-results/summary.csv</div></div>
+        </div>
+        <div class="lane">
+          <div class="lane-h"><span>קלאסטר Kubernetes</span><span>namespace elbencho-bench</span></div>
+          <div class="xarrow">◀ helm upgrade --install charts/elbencho</div>
+          <div class="node"><span class="st">5</span><div class="f">StatefulSet &lt;rel&gt;-elbencho</div><div class="d">PODS פודים, בכל אחד <code>elbencho --service</code> על פורט 1611 (ב-NFS/S3 גם 1612). Headless Service נותן לכל פוד שם DNS קבוע</div></div>
+          <div class="node"><div class="f">Deployment &lt;rel&gt;-elbencho-ctl</div><div class="d">פוד controller בלי storage. משתני הסביבה ELBENCHO_HOSTS ו-ELBENCHO_HOSTS_2 מכילים את רשימת כל ה-daemons</div></div>
+          <div class="xarrow">◀ kubectl exec … elbencho --hosts "$ELBENCHO_HOSTS"</div>
+          <div class="node hot"><span class="st">7</span><div class="f">prepare (רק אם צריך)</div><div class="d">כתיבת dataset. מסומן ב-annotation על ה-StatefulSet ולא חוזר בבדיקה הבאה</div></div>
+          <div class="arrow">ואז</div>
+          <div class="node hot"><span class="st">8</span><div class="f">השלב הנמדד</div><div class="d">ה-controller מתאם, כל daemon מריץ threads × iodepth מול ה-storage שלו, והתוצאות נשמרות ב-<code>/tmp/eb/&lt;run&gt;</code> בתוך ה-controller</div></div>
+        </div>
+        <div class="lane">
+          <div class="lane-h"><span>Storage</span><span>/data · /dev/elbencho · bucket</span></div>
+          <div class="store">
+            <div class="node p" style="--pcol: var(--nfs)"><div class="f">NFS</div><div class="d">PV סטטי עם nconnect וכו', או StorageClass RWX</div></div>
+            <div class="node p" style="--pcol: var(--xfs)"><div class="f">XFS</div><div class="d">PVC לכל פוד, מפורמט XFS, ב-/data</div></div>
+            <div class="node p" style="--pcol: var(--blk)"><div class="f">Block</div><div class="d">PVC volumeMode: Block, התקן גולמי ב-/dev/elbencho</div></div>
+            <div class="node p" style="--pcol: var(--s3)"><div class="f">S3</div><div class="d">בלי volume. endpoint ומפתחות מ-Secret</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="block">
+    <h2>שלבי הריצה בסדר</h2>
+    <ol class="steps">
+      <li><div><b>פרמטרים</b><span><code>run.sh</code> קורא את <code>KEY=VALUE</code> מהשורה. סדר העדיפות: ארגומנט בשורה, אחריו משתנה סביבה, אחריו <code>profile.env</code> של הפרוטוקול, ואחרון ברירת המחדל של הבדיקה.</span></div></li>
+      <li><div><b>קטלוג</b><span>מספר הבדיקה קובע את השם, את ה-layout (multi או single) ואת ברירות המחדל: block size, threads, iodepth. בדיקות 12 ו-13 הן sweeps: הן מריצות את <code>run.sh</code> שוב ושוב עם ערכים שונים ומדפיסות טבלת השוואה.</span></div></li>
+      <li><div><b>פריסה</b><span>נוצר <code>values.yaml</code> ומורץ <code>helm upgrade --install</code>. אם הפריסה כבר קיימת מבדיקה קודמת (<code>KEEP=1</code>), היא רק מתעדכנת. ב-XFS וב-NFS נבדק שסוג מערכת הקבצים ב-<code>/data</code> נכון.</span></div></li>
+      <li><div><b>הכנת נתונים</b><span>בדיקות קריאה ותמהילים צריכות נתונים קיימים. ההכנה רצה פעם אחת, והחתימה שלה (קבצים, גודל, פודים) נשמרת כ-annotation. בבדיקה הבאה עם אותם ערכים ההכנה מדולגת. <code>PREPARE=always</code> מכריח הכנה מחדש.</span></div></li>
+      <li><div><b>מדידה</b><span>ה-controller מריץ <code>elbencho --hosts</code> מול כל ה-daemons. השלבים הנמדדים רצים לפי זמן (<code>--timelimit DURATION --infloop</code>), עם latency ואחוזונים. בתמהילי S3 וב-checkpoint אסינכרוני רצות שתי ריצות מתואמות במקביל, על פורט 1611 ועל פורט 1612.</span></div></li>
+      <li><div><b>תוצאות</b><span>קבצי ה-CSV וה-TXT מועתקים מה-controller אל <code>results/</code>. מודפסת טבלה עם IOPS, MiB/s, latency ו-p99, ושורה לכל שלב נוספת ל-<code>results/summary.csv</code>.</span></div></li>
+      <li><div><b>ניקוי</b><span>כברירת מחדל הפריסה נשארת, כדי שהבדיקה הבאה תהיה מהירה. <code>KEEP=0</code> מסיר אותה בסוף, ו-<code>cleanup.sh &lt;proto&gt;</code> מסיר הכול כולל ה-PVCs.</span></div></li>
+    </ol>
+  </div>
+
+  <div class="block">
+    <h2>מפת הקבצים</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>קובץ</th><th>תפקיד</th></tr></thead>
+      <tbody>
+        <tr><td class="k">&lt;proto&gt;/NN-*.sh</td><td>נקודת הכניסה לבדיקה. שורה אחת: <code>exec lib/run.sh &lt;proto&gt; &lt;NN&gt; "$@"</code>. בראש הקובץ יש תיאור והפרמטרים הרלוונטיים</td></tr>
+        <tr><td class="k">&lt;proto&gt;/profile.env</td><td>ברירות מחדל לפרוטוקול, ופונקציה <code>profile_values</code> שכותבת את חלק ה-Helm שלו. ב-S3 גם יצירת ה-Secret</td></tr>
+        <tr><td class="k">lib/run.sh</td><td>המנוע: פרמטרים, קטלוג הבדיקות, sweeps, פריסה, הרצה ב-controller, איסוף וסיכום</td></tr>
+        <tr><td class="k">lib/tests-file.sh</td><td>הגדרות הבדיקות ל-NFS ול-XFS: קבצים ב-<code>/data/f1..fN</code></td></tr>
+        <tr><td class="k">lib/tests-block.sh</td><td>הגדרות הבדיקות ל-Block: ההתקן <code>/dev/elbencho</code>, כולל מילוי ראשוני מלא</td></tr>
+        <tr><td class="k">lib/tests-s3.sh</td><td>הגדרות הבדיקות ל-S3: buckets, prefixes, ותמהילים בשתי ריצות מתואמות</td></tr>
+        <tr><td class="k">lib/tests-ai.sh</td><td>בדיקות 14 ו-15 (Training ו-Inference) ל-NFS ול-S3, ותצוגת הסיכום שלהן</td></tr>
+        <tr><td class="k">run-suite.sh</td><td>מריץ כמה בדיקות ברצף על אותה פריסה. ברירת מחדל: 01–11</td></tr>
+        <tr><td class="k">cleanup.sh</td><td>מסיר את הפריסות, ה-PVCs וה-PVs של פרוטוקול. נתונים ב-S3 לא נמחקים</td></tr>
+        <tr><td class="k">charts/elbencho</td><td>ה-Helm chart: StatefulSet, Service, controller, PVC/PV ו-Secret</td></tr>
+        <tr><td class="k">results/</td><td>נוצר בריצה הראשונה, ולא נכנס ל-git</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <div class="block">
+    <h2>שני מבנים: multi ו-single</h2>
+    <div class="layouts">
+      <div class="lay">
+        <h3>multi: בדיקות 01–07, 10–13</h3>
+        <div class="pods"><div class="pod">pod-0<div class="vol"></div></div><div class="pod">pod-1<div class="vol"></div></div><div class="pod">pod-2<div class="vol"></div></div><div class="pod">pod-3<div class="vol"></div></div></div>
+        <p>לכל daemon יעד משלו: PVC משלו (XFS, Block), תיקייה פרטית ב-export (NFS), או פיזור על כמה buckets (S3). ב-file וב-block רץ <code>--nosvcshare</code>, אז כל פוד עובד על כל ה-dataset שלו. התוצאה: הביצועים הכוללים של המערכת.</p>
+      </div>
+      <div class="lay">
+        <h3>single: בדיקות 08–09, 14–15</h3>
+        <div class="pods"><div class="pod">pod-0</div><div class="pod">pod-1</div><div class="pod">pod-2</div><div class="pod">pod-3</div></div>
+        <div class="shared"></div>
+        <p>כל ה-daemons על יעד אחד: PVC אחד, תיקייה אחת, או bucket אחד, וה-dataset מתחלק ביניהם. מראה אם volume או bucket יחיד הופך לצוואר בקבוק. ב-RWO (XFS, Block) כל הפודים חייבים לרוץ על אותו צומת.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="block">
+    <h2>פרמטרים כלליים (כל הפרוטוקולים)</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>מפתח</th><th>ברירת מחדל</th><th>משמעות</th></tr></thead>
+      <tbody>
+        <tr><td class="k">PODS</td><td class="k">2</td><td>כמה daemons מייצרים עומס</td></tr>
+        <tr><td class="k">THREADS</td><td class="k">לפי בדיקה</td><td>threads לכל פוד. המקביליות בפועל לפוד היא THREADS × IODEPTH</td></tr>
+        <tr><td class="k">IODEPTH</td><td class="k">לפי בדיקה</td><td>עומק תור אסינכרוני (libaio) לכל thread</td></tr>
+        <tr><td class="k">BS / BS_MIX</td><td class="k">לפי בדיקה</td><td>גודל בלוק, או תמהיל משוקלל כמו <code>16k:2,64k:1</code></td></tr>
+        <tr><td class="k">READ_PCT</td><td class="k">70</td><td>אחוז הקריאות בבדיקות 05–07</td></tr>
+        <tr><td class="k">DURATION</td><td class="k">60</td><td>שניות לכל שלב נמדד (בבדיקה 10: 30)</td></tr>
+        <tr><td class="k">CPU / MEMORY</td><td class="k">–</td><td>requests = limits לכל daemon, למשל <code>CPU=8 MEMORY=16Gi</code></td></tr>
+        <tr><td class="k">SPREAD</td><td class="k">preferred</td><td>פיזור הפודים על צמתים: preferred, required, none</td></tr>
+        <tr><td class="k">NODE_SELECTOR</td><td class="k">–</td><td>למשל <code>role=bench</code></td></tr>
+        <tr><td class="k">PREPARE</td><td class="k">auto</td><td>הכנת dataset: auto, always, never</td></tr>
+        <tr><td class="k">KEEP</td><td class="k">1</td><td>להשאיר את הפריסה אחרי הבדיקה</td></tr>
+        <tr><td class="k">LAT / LIVE</td><td class="k">1 / 1</td><td>latency עם אחוזונים / שורת התקדמות כל 5 שניות</td></tr>
+        <tr><td class="k">EXTRA_ARGS</td><td class="k">–</td><td>ארגומנטים נוספים ל-elbencho בשלב הנמדד, למשל <code>--cpu</code></td></tr>
+        <tr><td class="k">IMAGE_REPO / IMAGE_TAG</td><td class="k">breuner/elbencho · v3.3-3</td><td>למשל mirror בסביבה סגורה</td></tr>
+        <tr><td class="k">NAMESPACE / HELM_ARGS</td><td class="k">elbencho-bench / –</td><td>namespace, וארגומנטים נוספים ל-helm (למשל tolerations)</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <div class="block">
+    <h2>לפי פרוטוקול</h2>
+    <div class="cards">
+      <a class="pcard" href="#nfs" style="--pc: var(--nfs)"><b>NFS</b><span>15 בדיקות, כולל sweep של nconnect ו-iodepth, Training ו-Inference</span></a>
+      <a class="pcard" href="#xfs" style="--pc: var(--xfs)"><b>XFS</b><span>13 בדיקות על block storage מפורמט XFS, כולל metadata</span></a>
+      <a class="pcard" href="#block" style="--pc: var(--blk)"><b>Block</b><span>12 בדיקות על התקן גולמי, כולל מילוי ראשוני</span></a>
+      <a class="pcard" href="#s3" style="--pc: var(--s3)"><b>S3</b><span>14 בדיקות: אובייקטים קטנים וגדולים, תמהילים, LIST/HEAD, AI</span></a>
+    </div>
+  </div>
+</section>
+
+<!-- ======================================================== NFS ======== -->
+<section class="view" data-v="nfs" id="v-nfs" hidden>
+  <div class="lead">
+    <h1>NFS <span class="chip">benchmarks/nfs</span></h1>
+    <p>כל הפודים מחברים את אותו export. בבדיקות multi כל פוד מקבל תיקייה פרטית (בשם הפוד) על ה-export, ובבדיקות single כולם עובדים על אותם קבצים. הנתונים הם <code>FILES</code> קבצים של <code>FILE_SIZE</code>, וכל הקריאות והכתיבות עם <code>--direct</code>, כדי שה-page cache של הלקוח לא ינפח את התוצאות.</p>
+  </div>
+
+  <div class="block">
+    <h2>הגדרות NFS</h2>
+    <p>שתי דרכים לחבר את ה-export. עם <code>NFS_SERVER</code> ה-chart יוצר PV סטטי עם אפשרויות ה-mount שלך, וכל שינוי בהן מאתחל את הפודים. עם <code>NFS_STORAGE_CLASS</code> משתמשים ב-StorageClass קיים (csi-driver-nfs, nfs-subdir), ואז אפשרויות ה-mount באות ממנו.</p>
+    <div class="tbl"><table>
+      <thead><tr><th>מפתח</th><th>ברירת מחדל</th><th>משמעות</th></tr></thead>
+      <tbody>
+        <tr><td class="k">NFS_SERVER / NFS_PATH</td><td class="k">– / /</td><td>השרת וה-export</td></tr>
+        <tr><td class="k">NFS_STORAGE_CLASS</td><td class="k">–</td><td>חלופה: StorageClass עם RWX</td></tr>
+        <tr><td class="k">NFS_VERS</td><td class="k">4.1</td><td>3, 4.0, 4.1, 4.2</td></tr>
+        <tr><td class="k">NCONNECT</td><td class="k">8</td><td>חיבורי TCP לכל mount (0 = כבוי). משפיע מאוד על IOPS</td></tr>
+        <tr><td class="k">RSIZE / WSIZE</td><td class="k">1048576</td><td>ל-IO רנדומלי קטן כדאי לנסות גם 65536</td></tr>
+        <tr><td class="k">NFS_EXTRA_OPTS</td><td class="k">hard</td><td>למשל <code>hard,noatime,actimeo=0</code></td></tr>
+        <tr><td class="k">FILES / FILE_SIZE</td><td class="k">8 / 4g</td><td>ה-dataset לכל פוד (multi) או בסך הכול (single)</td></tr>
+        <tr><td class="k">PVC_SIZE</td><td class="k">500Gi</td><td>גודל נומינלי. NFS לא אוכף אותו</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <div class="block">
+    <h2>הבדיקות</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>#</th><th>בדיקה</th><th>מה נמדד</th><th>ברירות מחדל</th><th>elbencho (עיקרי)</th></tr></thead>
+      <tbody>
+        <tr><td class="n">01</td><td>Write IOPS</td><td>כתיבה רנדומלית של בלוקים קטנים</td><td><span class="tag">4k · 16 thr · QD16</span></td><td class="args">-w --rand --direct -b 4k --nosvcshare</td></tr>
+        <tr><td class="n">02</td><td>Read IOPS</td><td>קריאה רנדומלית מ-dataset מוכן</td><td><span class="tag">4k · 16 thr · QD16</span></td><td class="args">-r --rand --direct -b 4k</td></tr>
+        <tr><td class="n">03</td><td>Write throughput</td><td>כתיבה סדרתית בבלוקים גדולים</td><td><span class="tag">1m · 8 thr · QD4</span></td><td class="args">-w --direct -b 1m</td></tr>
+        <tr><td class="n">04</td><td>Read throughput</td><td>קריאה סדרתית בבלוקים גדולים</td><td><span class="tag">1m · 8 thr · QD4</span></td><td class="args">-r --direct -b 1m</td></tr>
+        <tr><td class="n">05</td><td>Mix 70/30 · 32k–128k</td><td>70% קריאה ו-30% כתיבה, רנדומלי</td><td><span class="tag">16 thr · QD8</span></td><td class="args">--rwmixpct 70 --rand -b 32k:1,64k:1,128k:1</td></tr>
+        <tr><td class="n">06</td><td>Mix 70/30 · ≤4k</td><td>אותו דבר בבלוקים קטנים</td><td><span class="tag">4k · 16 thr · QD16</span></td><td class="args">--rwmixpct 70 --rand -b 4k</td></tr>
+        <tr><td class="n">07</td><td>Mix 70/30 · 256k–1m</td><td>אותו דבר בבלוקים גדולים</td><td><span class="tag">8 thr · QD4</span></td><td class="args">--rwmixpct 70 --rand -b 256k:1,512k:1,1m:1</td></tr>
+        <tr><td class="n">08</td><td>Read IOPS, יעד יחיד</td><td>כל הפודים על אותם קבצים</td><td><span class="tag">כמו 02</span></td><td class="args">-r --rand (בלי --nosvcshare)</td></tr>
+        <tr><td class="n">09</td><td>Write IOPS, יעד יחיד</td><td>כמו 08, כתיבה</td><td><span class="tag">כמו 01</span></td><td class="args">-w --rand</td></tr>
+        <tr><td class="n">10</td><td>Latency QD1</td><td>latency טהור: thread אחד, עומק 1, עם p99.99</td><td><span class="tag">4k · 1 thr · QD1 · 30s</span></td><td class="args">-r/-w --rand -t 1 --iodepth 1 --latpercent9s 2</td></tr>
+        <tr><td class="n">11</td><td>Metadata</td><td>create, stat ו-delete של הרבה קבצים ריקים</td><td><span class="tag">16 thr · 10 dirs · 1000 files</span></td><td class="args">-d -w -s 0 / --stat / -F -D</td></tr>
+        <tr><td class="n">12</td><td>Scaling sweep</td><td>בדיקה אחרת עם 1→8 פודים, ו-nconnect שונים</td><td><span class="tag">SWEEP_PODS="1 2 4 8"</span></td><td class="args">SWEEP_TEST SWEEP_PODS SWEEP_NCONNECT SWEEP_IODEPTH</td></tr>
+        <tr><td class="n">13</td><td>IODEPTH sweep</td><td>עקומת IOPS ו-p99 מול עומק התור</td><td><span class="tag">1 2 4 … 128</span></td><td class="args">SWEEP_TEST SWEEP_IODEPTH</td></tr>
+        <tr><td class="n">14</td><td>AI Training</td><td>epochs בסדר אקראי, checkpoint, restore</td><td><span class="tag">resnet50 · 3 epochs · 8g ckpt</span></td><td class="args">--treefile --treerand · -d -w (ckpt)</td></tr>
+        <tr><td class="n">15</td><td>AI Inference</td><td>טעינת מודל, lookups, KV-cache</td><td><span class="tag">16g model · 16 thr</span></td><td class="args">--nosvcshare -r · --rand -b 4k:1,16k:1,64k:1 · --rwmixpct 50</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <div class="block">
+    <h2>הרצות מומלצות</h2>
+    <div class="runs">
+      <div class="run"><h3>בסיס מלא <span class="why">כל הבדיקות 01–11 על אותה פריסה, דקתיים לכל שלב</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/run-suite.sh nfs NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench \
+  PODS=4 DURATION=120 SPREAD=required</pre></div></div>
+
+      <div class="run"><h3>מקסימום Read IOPS <span class="why">הרבה בקשות פתוחות, rsize קטן, nconnect גבוה</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/02-read-iops.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench \
+  PODS=8 THREADS=16 IODEPTH=32 NCONNECT=16 RSIZE=65536 WSIZE=65536 SPREAD=required</pre></div></div>
+
+      <div class="run"><h3>מקסימום Read throughput <span class="why">בלוקים של 4m, קבצים גדולים, rsize של 1M</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/04-read-throughput.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench \
+  PODS=8 THREADS=8 BS=4m FILE_SIZE=16g NCONNECT=16</pre></div></div>
+
+      <div class="run"><h3>כמה nconnect באמת עוזר <span class="why">אותה בדיקה עם 1, 4, 8 ו-16 חיבורים</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/12-scaling-sweep.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench \
+  SWEEP_TEST=02 SWEEP_PODS="4" SWEEP_NCONNECT="1 4 8 16"</pre></div></div>
+
+      <div class="run"><h3>עקומת queue depth <span class="why">thread אחד לפוד, כדי לראות את השפעת העומק בלבד</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/13-iodepth-sweep.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench \
+  PODS=4 THREADS=1 SWEEP_TEST=02</pre></div></div>
+
+      <div class="run"><h3>תמהיל 70/30 יציב <span class="why">5 דקות, כדי לעבור את ה-cache של השרת</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/05-mix70-32k-128k.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench \
+  PODS=4 IODEPTH=16 DURATION=300 FILE_SIZE=16g</pre></div></div>
+
+      <div class="run"><h3>AI Training עם checkpoint ברקע <span class="why">unet3d, 8 צמתים, יעד GPU של 1500 MiB/s לפוד</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/14-ai-training.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench \
+  PODS=8 TRAIN_PRESET=unet3d TRAIN_SAMPLES=2000 EPOCHS=3 \
+  CKPT_SIZE=32g CKPT_MODE=async TRAIN_REQUIRED_MIBS=1500</pre></div></div>
+
+      <div class="run"><h3>AI Inference: 16 replicas עולים יחד <span class="why">מודל של 140GB ב-30 shards</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/15-ai-inference.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench \
+  PODS=16 MODEL_SIZE=140g MODEL_SHARDS=30 LOAD_THREADS=32</pre></div></div>
+
+      <div class="run"><h3>Metadata ו-latency <span class="why">create, stat, delete; ואז QD1 לבדיקת זמן תגובה</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/11-metadata.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench PODS=4 META_DIRS=20 META_FILES=2000
+./benchmarks/nfs/10-latency-qd1.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench PODS=1 DURATION=120</pre></div></div>
+
+      <div class="run"><h3>עם StorageClass קיים <span class="why">כשה-NFS כבר מחובר דרך CSI</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/02-read-iops.sh NFS_STORAGE_CLASS=nfs-csi PODS=4</pre></div></div>
+    </div>
+  </div>
+
+  <div class="note"><strong>לפני שמסתמכים על המספרים</strong><span>ה-dataset (<code>PODS × FILES × FILE_SIZE</code>) צריך להיות גדול בבירור מה-cache של שרת ה-NFS. <code>--direct</code> עוקף רק את ה-cache של הלקוח. כדאי גם לפזר את הפודים על צמתים (<code>SPREAD=required</code>), כדי שכרטיס רשת של צומת אחד לא יהיה הגבול.</span></div>
+</section>
+
+<!-- ======================================================== XFS ======== -->
+<section class="view" data-v="xfs" id="v-xfs" hidden>
+  <div class="lead">
+    <h1>XFS <span class="chip">benchmarks/xfs</span></h1>
+    <p>Block storage עם מערכת קבצים XFS. Kubernetes מפרמט את ה-volume לפי ה-StorageClass, והסקריפט בודק אחרי הפריסה ש-<code>/data</code> בפודים הוא באמת XFS, ומזהיר אם לא. בבדיקות multi כל פוד מקבל PVC משלו.</p>
+  </div>
+
+  <div class="block">
+    <h2>הגדרות XFS</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>מפתח</th><th>ברירת מחדל</th><th>משמעות</th></tr></thead>
+      <tbody>
+        <tr><td class="k">STORAGE_CLASS</td><td class="k">חובה</td><td>StorageClass שמפרמט XFS. ב-CSI: <code>csi.storage.k8s.io/fstype: xfs</code>. ב-local PV: <code>fsType: xfs</code></td></tr>
+        <tr><td class="k">PVC_SIZE</td><td class="k">50Gi</td><td>לכל פוד (multi), או ה-volume המשותף (single)</td></tr>
+        <tr><td class="k">FILES / FILE_SIZE</td><td class="k">8 / 4g</td><td>ה-dataset. חייב להיכנס ב-PVC_SIZE</td></tr>
+        <tr><td class="k">ACCESS_MODE</td><td class="k">ReadWriteOnce</td><td>ב-RWO בדיקות 08–09 ממקמות את כל הפודים על צומת אחד</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <div class="block">
+    <h2>הבדיקות</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>#</th><th>בדיקה</th><th>מה נמדד</th><th>ברירות מחדל</th><th>elbencho (עיקרי)</th></tr></thead>
+      <tbody>
+        <tr><td class="n">01</td><td>Write IOPS</td><td>כתיבה רנדומלית, כל פוד על ה-PVC שלו</td><td><span class="tag">4k · 16 thr · QD16</span></td><td class="args">-w --rand --direct -b 4k --nosvcshare</td></tr>
+        <tr><td class="n">02</td><td>Read IOPS</td><td>קריאה רנדומלית מ-dataset מוכן</td><td><span class="tag">4k · 16 thr · QD16</span></td><td class="args">-r --rand --direct -b 4k</td></tr>
+        <tr><td class="n">03</td><td>Write throughput</td><td>כתיבה סדרתית</td><td><span class="tag">1m · 8 thr · QD4</span></td><td class="args">-w --direct -b 1m</td></tr>
+        <tr><td class="n">04</td><td>Read throughput</td><td>קריאה סדרתית</td><td><span class="tag">1m · 8 thr · QD4</span></td><td class="args">-r --direct -b 1m</td></tr>
+        <tr><td class="n">05</td><td>Mix 70/30 · 32k–128k</td><td>תמהיל רנדומלי</td><td><span class="tag">16 thr · QD8</span></td><td class="args">--rwmixpct 70 --rand -b 32k:1,64k:1,128k:1</td></tr>
+        <tr><td class="n">06</td><td>Mix 70/30 · ≤4k</td><td>תמהיל רנדומלי, בלוקים קטנים</td><td><span class="tag">4k · 16 thr · QD16</span></td><td class="args">--rwmixpct 70 --rand -b 4k</td></tr>
+        <tr><td class="n">07</td><td>Mix 70/30 · 256k–1m</td><td>תמהיל רנדומלי, בלוקים גדולים</td><td><span class="tag">8 thr · QD4</span></td><td class="args">--rwmixpct 70 --rand -b 256k:1,512k:1,1m:1</td></tr>
+        <tr><td class="n">08</td><td>Read IOPS, PVC יחיד</td><td>כל הפודים על PVC אחד (אותו צומת)</td><td><span class="tag">כמו 02</span></td><td class="args">-r --rand</td></tr>
+        <tr><td class="n">09</td><td>Write IOPS, PVC יחיד</td><td>כמו 08, כתיבה</td><td><span class="tag">כמו 01</span></td><td class="args">-w --rand</td></tr>
+        <tr><td class="n">10</td><td>Latency QD1</td><td>latency טהור עם p99.99</td><td><span class="tag">4k · QD1 · 30s</span></td><td class="args">-t 1 --iodepth 1 --latpercent9s 2</td></tr>
+        <tr><td class="n">11</td><td>Metadata</td><td>create, stat, delete</td><td><span class="tag">16 thr · 10×1000</span></td><td class="args">-d -w -s 0 / --stat / -F -D</td></tr>
+        <tr><td class="n">12</td><td>Scaling sweep</td><td>1→8 פודים</td><td><span class="tag">SWEEP_PODS</span></td><td class="args">SWEEP_TEST SWEEP_PODS SWEEP_IODEPTH</td></tr>
+        <tr><td class="n">13</td><td>IODEPTH sweep</td><td>IOPS ו-p99 מול עומק התור</td><td><span class="tag">1 … 128</span></td><td class="args">SWEEP_TEST SWEEP_IODEPTH</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <div class="block">
+    <h2>הרצות מומלצות</h2>
+    <div class="runs">
+      <div class="run"><h3>בסיס מלא <span class="why">PVC של 200Gi לכל פוד, dataset של 64GB לפוד</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/run-suite.sh xfs STORAGE_CLASS=my-xfs-sc \
+  PODS=4 PVC_SIZE=200Gi FILES=8 FILE_SIZE=8g DURATION=120 SPREAD=required</pre></div></div>
+
+      <div class="run"><h3>מקסימום Read IOPS <span class="why">16 threads × עומק 32 = 512 בקשות פתוחות לפוד</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/xfs/02-read-iops.sh STORAGE_CLASS=my-xfs-sc PODS=4 THREADS=16 IODEPTH=32</pre></div></div>
+
+      <div class="run"><h3>מקסימום Write throughput <span class="why">בלוקים של 1m ו-4m, להשוואה</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/xfs/03-write-throughput.sh STORAGE_CLASS=my-xfs-sc PODS=4 BS=1m
+./benchmarks/xfs/03-write-throughput.sh STORAGE_CLASS=my-xfs-sc PODS=4 BS=4m</pre></div></div>
+
+      <div class="run"><h3>עקומת queue depth <span class="why">1 עד 128, כדי למצוא את נקודת הרוויה</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/xfs/13-iodepth-sweep.sh STORAGE_CLASS=my-xfs-sc PODS=4 THREADS=4 SWEEP_TEST=02</pre></div></div>
+
+      <div class="run"><h3>Write IOPS במצב יציב <span class="why">30 דקות, כדי לעבור write caches ו-garbage collection של ה-SSD</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/xfs/01-write-iops.sh STORAGE_CLASS=my-xfs-sc PODS=4 IODEPTH=32 DURATION=1800</pre></div></div>
+
+      <div class="run"><h3>volume יחיד תחת עומס <span class="why">4 פודים על PVC אחד באותו צומת</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/xfs/08-single-target-read-iops.sh STORAGE_CLASS=my-xfs-sc PODS=4 PVC_SIZE=200Gi</pre></div></div>
+
+      <div class="run"><h3>Latency ו-metadata <span class="why">זמן תגובה של קריאה אחת, ויצירת קבצים</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/xfs/10-latency-qd1.sh STORAGE_CLASS=my-xfs-sc PODS=1 DURATION=120
+./benchmarks/xfs/11-metadata.sh STORAGE_CLASS=my-xfs-sc PODS=4 META_DIRS=20 META_FILES=5000</pre></div></div>
+    </div>
+  </div>
+
+  <div class="note"><strong>שמור על התאמה בין הגדלים</strong><span><code>FILES × FILE_SIZE</code> חייב להיכנס ב-<code>PVC_SIZE</code>, עם מקום נוסף לבדיקת ה-metadata. כדי לבדוק את אותו דיסק בלי מערכת קבצים, הרץ את אותן בדיקות מעמוד Block על StorageClass שתומך ב-Block.</span></div>
+</section>
+
+<!-- ====================================================== BLOCK ======== -->
+<section class="view" data-v="block" id="v-block" hidden>
+  <div class="lead">
+    <h1>Block <span class="chip">benchmarks/raw-block</span></h1>
+    <p>התקן גולמי בלי מערכת קבצים: PVC עם <code>volumeMode: Block</code> שמחובר לכל פוד כ-<code>/dev/elbencho</code>. בלי <code>DEV_SIZE</code> נבדק כל ההתקן. לפני בדיקות קריאה ההתקן עובר מילוי ראשוני מלא (preconditioning), כי קריאה מבלוקים שלא נכתבו מעולם מהירה באופן לא מציאותי.</p>
+  </div>
+
+  <div class="note"><strong>הבדיקות דורסות את כל ההתקן</strong><span>כל PVC שהסקריפט יוצר נכתב מההתחלה ועד הסוף. אל תצביע את הבדיקות על התקן עם נתונים.</span></div>
+
+  <div class="block">
+    <h2>הגדרות Block</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>מפתח</th><th>ברירת מחדל</th><th>משמעות</th></tr></thead>
+      <tbody>
+        <tr><td class="k">STORAGE_CLASS</td><td class="k">חובה</td><td>StorageClass שתומך ב-volumeMode: Block</td></tr>
+        <tr><td class="k">PVC_SIZE</td><td class="k">50Gi</td><td>גודל ההתקן לכל פוד (multi), או ההתקן המשותף (single)</td></tr>
+        <tr><td class="k">DEV_SIZE</td><td class="k">כל ההתקן</td><td>הגבלת הטווח הנבדק, למשל <code>100g</code>. מקצר גם את המילוי הראשוני</td></tr>
+        <tr><td class="k">ACCESS_MODE</td><td class="k">ReadWriteOnce</td><td>לשיתוף התקן בין צמתים צריך RWX block (למשל Ceph RBD)</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <div class="block">
+    <h2>הבדיקות</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>#</th><th>בדיקה</th><th>מה נמדד</th><th>ברירות מחדל</th><th>elbencho (עיקרי)</th></tr></thead>
+      <tbody>
+        <tr><td class="n">01</td><td>Write IOPS</td><td>כתיבה רנדומלית על כל ההתקן</td><td><span class="tag">4k · 16 thr · QD16</span></td><td class="args">-w --rand --direct -b 4k /dev/elbencho</td></tr>
+        <tr><td class="n">02</td><td>Read IOPS</td><td>קריאה רנדומלית, אחרי מילוי</td><td><span class="tag">4k · 16 thr · QD16</span></td><td class="args">-r --rand --direct -b 4k</td></tr>
+        <tr><td class="n">03</td><td>Write throughput</td><td>כתיבה סדרתית</td><td><span class="tag">1m · 8 thr · QD4</span></td><td class="args">-w --direct -b 1m</td></tr>
+        <tr><td class="n">04</td><td>Read throughput</td><td>קריאה סדרתית</td><td><span class="tag">1m · 8 thr · QD4</span></td><td class="args">-r --direct -b 1m</td></tr>
+        <tr><td class="n">05</td><td>Mix 70/30 · 32k–128k</td><td>תמהיל רנדומלי</td><td><span class="tag">16 thr · QD8</span></td><td class="args">--rwmixpct 70 --rand -b 32k:1,64k:1,128k:1</td></tr>
+        <tr><td class="n">06</td><td>Mix 70/30 · ≤4k</td><td>תמהיל, בלוקים קטנים</td><td><span class="tag">4k · 16 thr · QD16</span></td><td class="args">--rwmixpct 70 --rand -b 4k</td></tr>
+        <tr><td class="n">07</td><td>Mix 70/30 · 256k–1m</td><td>תמהיל, בלוקים גדולים</td><td><span class="tag">8 thr · QD4</span></td><td class="args">--rwmixpct 70 --rand -b 256k:1,512k:1,1m:1</td></tr>
+        <tr><td class="n">08</td><td>Read IOPS, התקן יחיד</td><td>כל הפודים על התקן אחד (אותו צומת)</td><td><span class="tag">כמו 02</span></td><td class="args">-r --rand (הטווח מתחלק)</td></tr>
+        <tr><td class="n">09</td><td>Write IOPS, התקן יחיד</td><td>כמו 08, כתיבה</td><td><span class="tag">כמו 01</span></td><td class="args">-w --rand</td></tr>
+        <tr><td class="n">10</td><td>Latency QD1</td><td>latency טהור עם p99.99</td><td><span class="tag">4k · QD1 · 30s</span></td><td class="args">-t 1 --iodepth 1 --latpercent9s 2</td></tr>
+        <tr><td class="n">12</td><td>Scaling sweep</td><td>1→8 פודים</td><td><span class="tag">SWEEP_PODS</span></td><td class="args">SWEEP_TEST SWEEP_PODS SWEEP_IODEPTH</td></tr>
+        <tr><td class="n">13</td><td>IODEPTH sweep</td><td>IOPS ו-p99 מול עומק התור</td><td><span class="tag">1 … 128</span></td><td class="args">SWEEP_TEST SWEEP_IODEPTH</td></tr>
+      </tbody>
+    </table></div>
+    <p>בדיקה 11 (metadata) לא קיימת ב-Block, כי אין מערכת קבצים.</p>
+  </div>
+
+  <div class="block">
+    <h2>הרצות מומלצות</h2>
+    <div class="runs">
+      <div class="run"><h3>בסיס מלא <span class="why">התקן של 200Gi לכל פוד. המילוי הראשוני רץ פעם אחת</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/run-suite.sh raw-block STORAGE_CLASS=my-block-sc \
+  PODS=4 PVC_SIZE=200Gi DURATION=120 SPREAD=required</pre></div></div>
+
+      <div class="run"><h3>מקסימום Write IOPS, מצב יציב <span class="why">עומק 64 למשך 10 דקות</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/raw-block/01-write-iops.sh STORAGE_CLASS=my-block-sc PODS=4 IODEPTH=64 DURATION=600</pre></div></div>
+
+      <div class="run"><h3>מקסימום Read IOPS <span class="why">NVMe-class: הרבה threads ועומק גבוה</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/raw-block/02-read-iops.sh STORAGE_CLASS=my-block-sc PODS=4 THREADS=16 IODEPTH=64</pre></div></div>
+
+      <div class="run"><h3>Throughput בשני גדלים <span class="why">1m ו-4m, להשוואה</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/raw-block/04-read-throughput.sh STORAGE_CLASS=my-block-sc PODS=4 BS=1m
+./benchmarks/raw-block/04-read-throughput.sh STORAGE_CLASS=my-block-sc PODS=4 BS=4m</pre></div></div>
+
+      <div class="run"><h3>עקומת queue depth לכתיבה <span class="why">אותו sweep על בדיקה 01</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/raw-block/13-iodepth-sweep.sh STORAGE_CLASS=my-block-sc PODS=4 THREADS=4 SWEEP_TEST=01</pre></div></div>
+
+      <div class="run"><h3>דיסק גדול, טווח מוגבל <span class="why">בודק 100GB מתוך התקן של 2TB, ומקצר את המילוי</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/raw-block/02-read-iops.sh STORAGE_CLASS=my-block-sc PVC_SIZE=2Ti DEV_SIZE=100g PODS=2</pre></div></div>
+
+      <div class="run"><h3>Latency של קריאה אחת <span class="why">פוד אחד, QD1, שתי דקות</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/raw-block/10-latency-qd1.sh STORAGE_CLASS=my-block-sc PODS=1 DURATION=120</pre></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================= S3 ======== -->
+<section class="view" data-v="s3" id="v-s3" hidden>
+  <div class="lead">
+    <h1>S3 <span class="chip">benchmarks/s3</span></h1>
+    <p>בלי volumes. הפודים מקבלים endpoint ומפתחות מ-Secret, והסקריפט מעביר אותם ל-elbencho כ-<code>--s3endpoints</code> וכו'. ב-S3 "IOPS" הם בקשות על אובייקטים בשנייה. כל סוג dataset נשמר תחת prefix משלו, כדי שבדיקות לא יפריעו זו לזו.</p>
+  </div>
+
+  <div class="block">
+    <h2>הגדרות S3</h2>
+    <div class="code"><button class="copy" type="button">העתק</button><pre><span class="c"># פעם אחת: Secret עם המפתחות</span>
+kubectl create namespace elbencho-bench
+kubectl -n elbencho-bench create secret generic s3-creds \
+  --from-literal=AWS_ACCESS_KEY_ID=... --from-literal=AWS_SECRET_ACCESS_KEY=...</pre></div>
+    <div class="tbl"><table>
+      <thead><tr><th>מפתח</th><th>ברירת מחדל</th><th>משמעות</th></tr></thead>
+      <tbody>
+        <tr><td class="k">S3_ENDPOINT</td><td class="k">חובה</td><td>למשל <code>http://minio.minio.svc:9000</code></td></tr>
+        <tr><td class="k">S3_SECRET_NAME</td><td class="k">–</td><td>Secret קיים (מומלץ)</td></tr>
+        <tr><td class="k">S3_ACCESS_KEY / S3_SECRET_KEY</td><td class="k">–</td><td>חלופה: הסקריפט יוצר את ה-Secret. המפתחות לא נשמרים בתוצאות</td></tr>
+        <tr><td class="k">S3_REGION</td><td class="k">–</td><td></td></tr>
+        <tr><td class="k">BUCKET_PREFIX / BUCKETS</td><td class="k">elbencho / 4</td><td>multi: <code>elbencho-1..4</code>. single: <code>elbencho-single</code>. תמהילים: <code>elbencho-mix</code>. AI: <code>elbencho-ai</code></td></tr>
+        <tr><td class="k">OBJ_SIZE / OBJECTS</td><td class="k">4k / 1000</td><td>בדיקות IOPS: גודל אובייקט, ומספר אובייקטים לכל thread</td></tr>
+        <tr><td class="k">TPUT_OBJ_SIZE / TPUT_OBJECTS</td><td class="k">256m / 4</td><td>בדיקות throughput: multipart בחלקים של <code>BS</code> (16m)</td></tr>
+        <tr><td class="k">MIX_OBJECTS</td><td class="k">20000</td><td>גודל ה-dataset בגדלים מעורבים (05–07)</td></tr>
+        <tr><td class="k">META_FILES</td><td class="k">2000</td><td>אובייקטים לכל thread בבדיקה 11</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <div class="block">
+    <h2>הבדיקות</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>#</th><th>בדיקה</th><th>מה נמדד</th><th>ברירות מחדל</th><th>elbencho (עיקרי)</th></tr></thead>
+      <tbody>
+        <tr><td class="n">01</td><td>Write IOPS</td><td>PUT של אובייקטים קטנים</td><td><span class="tag">4k · 32 thr</span></td><td class="args">-w -n 1 -N 1000 -s 4k -b 4k bucket-[1-4]</td></tr>
+        <tr><td class="n">02</td><td>Read IOPS</td><td>GET של אובייקטים קטנים</td><td><span class="tag">4k · 32 thr</span></td><td class="args">-r --s3fastget</td></tr>
+        <tr><td class="n">03</td><td>Write throughput</td><td>PUT של אובייקטים גדולים (multipart)</td><td><span class="tag">256m · 16m parts · 16 thr</span></td><td class="args">-w -s 256m -b 16m</td></tr>
+        <tr><td class="n">04</td><td>Read throughput</td><td>GET בטווחים של 16m</td><td><span class="tag">16 thr</span></td><td class="args">-r --s3fastget -b 16m</td></tr>
+        <tr><td class="n">05</td><td>Mix 70/30 · 32k–128k</td><td>קוראים וכותבים במקביל, גדלי אובייקט מעורבים</td><td><span class="tag">20 thr → 14 R / 6 W</span></td><td class="args">2 ריצות מתואמות · --treefile · --start</td></tr>
+        <tr><td class="n">06</td><td>Mix 70/30 · ≤4k</td><td>אובייקטים של 1k, 2k ו-4k</td><td><span class="tag">20 thr</span></td><td class="args">BS_MIX=1k:1,2k:1,4k:1</td></tr>
+        <tr><td class="n">07</td><td>Mix 70/30 · 256k–1m</td><td>אובייקטים של 256k, 512k ו-1m</td><td><span class="tag">20 thr</span></td><td class="args">BS_MIX=256k:1,512k:1,1m:1</td></tr>
+        <tr><td class="n">08</td><td>Read IOPS, bucket יחיד</td><td>כל הפודים על bucket אחד</td><td><span class="tag">כמו 02</span></td><td class="args">elbencho-single</td></tr>
+        <tr><td class="n">09</td><td>Write IOPS, bucket יחיד</td><td>כמו 08, PUT</td><td><span class="tag">כמו 01</span></td><td class="args">elbencho-single</td></tr>
+        <tr><td class="n">10</td><td>Latency</td><td>PUT ו-GET עם thread אחד, עם p99.99</td><td><span class="tag">4k · 1 thr · 30s</span></td><td class="args">-t 1 --latpercent9s 2</td></tr>
+        <tr><td class="n">11</td><td>Metadata</td><td>PUT, LIST, HEAD ו-DELETE</td><td><span class="tag">16 thr · 2000</span></td><td class="args">-w -s 0 / --s3listobjpar / --stat / -F</td></tr>
+        <tr><td class="n">12</td><td>Scaling sweep</td><td>1→8 פודים</td><td><span class="tag">SWEEP_PODS</span></td><td class="args">SWEEP_TEST SWEEP_PODS</td></tr>
+        <tr><td class="n">14</td><td>AI Training</td><td>epochs בסדר אקראי, checkpoint, restore</td><td><span class="tag">resnet50 · 16m reads</span></td><td class="args">--treefile --treerand --s3fastget</td></tr>
+        <tr><td class="n">15</td><td>AI Inference</td><td>טעינת מודל, lookups, KV-cache</td><td><span class="tag">16g model · 16m ranges</span></td><td class="args">--nosvcshare -r · --rwmixthr</td></tr>
+      </tbody>
+    </table></div>
+    <p>בדיקה 13 (IODEPTH sweep) לא קיימת ב-S3: שם המקביליות באה ממספר ה-threads, ובדיקה 12 עם <code>THREADS</code> שונים עונה על השאלה הזו.</p>
+  </div>
+
+  <div class="block">
+    <h2>הרצות מומלצות</h2>
+    <div class="runs">
+      <div class="run"><h3>בסיס מלא <span class="why">כל הבדיקות 01–11</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/run-suite.sh s3 S3_ENDPOINT=http://minio.minio.svc:9000 S3_SECRET_NAME=s3-creds \
+  PODS=4 DURATION=120 SPREAD=required</pre></div></div>
+
+      <div class="run"><h3>אובייקטים קטנים: PUT ו-GET <span class="why">64 threads לפוד, 8 פודים</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/s3/01-write-iops.sh S3_ENDPOINT=http://minio.minio.svc:9000 S3_SECRET_NAME=s3-creds PODS=8 THREADS=64
+./benchmarks/s3/02-read-iops.sh  S3_ENDPOINT=http://minio.minio.svc:9000 S3_SECRET_NAME=s3-creds PODS=8 THREADS=64</pre></div></div>
+
+      <div class="run"><h3>אובייקטים בינוניים <span class="why">64KB במקום 4KB, אותה בדיקה</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/s3/02-read-iops.sh S3_ENDPOINT=http://minio.minio.svc:9000 S3_SECRET_NAME=s3-creds PODS=8 OBJ_SIZE=64k</pre></div></div>
+
+      <div class="run"><h3>מקסימום throughput <span class="why">אובייקטים של 1GB בחלקים של 32m</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/s3/03-write-throughput.sh S3_ENDPOINT=http://minio.minio.svc:9000 S3_SECRET_NAME=s3-creds \
+  PODS=8 THREADS=16 TPUT_OBJ_SIZE=1g BS=32m
+./benchmarks/s3/04-read-throughput.sh S3_ENDPOINT=http://minio.minio.svc:9000 S3_SECRET_NAME=s3-creds \
+  PODS=8 THREADS=16 TPUT_OBJ_SIZE=1g BS=32m</pre></div></div>
+
+      <div class="run"><h3>bucket אחד מול הרבה <span class="why">האם bucket יחיד מגביל? השווה 02 מול 08</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/s3/02-read-iops.sh S3_ENDPOINT=http://minio.minio.svc:9000 S3_SECRET_NAME=s3-creds PODS=8 BUCKETS=8
+./benchmarks/s3/08-single-target-read-iops.sh S3_ENDPOINT=http://minio.minio.svc:9000 S3_SECRET_NAME=s3-creds PODS=8</pre></div></div>
+
+      <div class="run"><h3>תמהיל 70/30 <span class="why">הסיכום מראה את אחוז הקריאה שהתקבל בפועל</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/s3/05-mix70-32k-128k.sh S3_ENDPOINT=http://minio.minio.svc:9000 S3_SECRET_NAME=s3-creds \
+  PODS=4 THREADS=40 DURATION=300</pre></div></div>
+
+      <div class="run"><h3>גדילה עם פודים <span class="why">GET של אובייקטים קטנים עם 1, 2, 4, 8 ו-16 פודים</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/s3/12-scaling-sweep.sh S3_ENDPOINT=http://minio.minio.svc:9000 S3_SECRET_NAME=s3-creds \
+  SWEEP_TEST=02 SWEEP_PODS="1 2 4 8 16"</pre></div></div>
+
+      <div class="run"><h3>AI Training על S3 <span class="why">cosmoflow, checkpoint של 16GB לפוד</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/s3/14-ai-training.sh S3_ENDPOINT=http://minio.minio.svc:9000 S3_SECRET_NAME=s3-creds \
+  PODS=8 TRAIN_PRESET=cosmoflow TRAIN_SAMPLES=20000 CKPT_SIZE=16g CKPT_MODE=async</pre></div></div>
+
+      <div class="run"><h3>AI Inference על S3 <span class="why">מודל של 70GB, 16 replicas</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/s3/15-ai-inference.sh S3_ENDPOINT=http://minio.minio.svc:9000 S3_SECRET_NAME=s3-creds \
+  PODS=16 MODEL_SIZE=70g MODEL_SHARDS=15 LOAD_THREADS=32</pre></div></div>
+    </div>
+  </div>
+
+  <div class="note"><strong>שתי נקודות על S3</strong><span>elbencho לא מאפשר <code>--rwmixpct</code> ב-S3, לכן התמהילים רצים כשתי ריצות מתואמות (קוראים וכותבים) שמתחילות באותה שנייה. <code>cleanup.sh</code> לא מוחק נתונים מה-buckets.</span></div>
+</section>
+
+</div></main>
+
+<footer><div class="wrap">המדריך מתאר את התיקייה <span class="mono">benchmarks/</span> בריפו elbencho-benchmark-chart. הפירוט המלא של כל פרמטר נמצא ב-<span class="mono">benchmarks/README.md</span>.</div></footer>
+
+<script>
+(function () {
+  document.documentElement.setAttribute("dir", "rtl");
+  document.documentElement.setAttribute("lang", "he");
+  var views = ["home", "nfs", "xfs", "block", "s3"];
+  function show() {
+    var v = (location.hash || "#home").slice(1);
+    if (views.indexOf(v) < 0) v = "home";
+    views.forEach(function (n) {
+      document.getElementById("v-" + n).hidden = (n !== v);
+    });
+    document.querySelectorAll("nav.tabs a").forEach(function (a) {
+      if (a.dataset.v === v) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+    });
+  }
+  window.addEventListener("hashchange", function () { show(); window.scrollTo(0, 0); });
+  show();
+
+  document.querySelectorAll(".copy").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var pre = btn.parentElement.querySelector("pre");
+      var text = pre.innerText;
+      var done = function () { btn.textContent = "הועתק"; setTimeout(function () { btn.textContent = "העתק"; }, 1400); };
+      var fallback = function () {
+        var r = document.createRange(); r.selectNodeContents(pre);
+        var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+        btn.textContent = "סומן, Ctrl+C";
+      };
+      try {
+        navigator.clipboard.writeText(text).then(done, fallback);
+      } catch (e) { fallback(); }
+    });
+  });
+})();
+</script>
