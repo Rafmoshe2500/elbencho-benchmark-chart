@@ -1,0 +1,10 @@
+# Block device formatted as XFS. The formatting is done by Kubernetes, driven by the StorageClass:
+#   CSI drivers:  parameters: { csi.storage.k8s.io/fstype: xfs }
+#   local PVs:    spec.local.fsType: xfs   (kubelet runs mkfs.xfs on an unformatted device)
+mode: job
+protocol: file
+persistence:
+  storageClass: my-xfs-storageclass
+  size: 100Gi
+job:
+  args: ["-w", "-r", "--direct", "-t", "8", "-s", "20g", "-b", "1m", "/data/testfile"]

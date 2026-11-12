@@ -42,10 +42,12 @@ kubectl get pvc local-pvc
 ```
 *Expected Output: STATUS should be `Bound`.*
 
-### Step 5: Load the Docker image into Minikube
-Load the locally built `rafmoshe2500/elbencho:3.1-5` image into the Minikube registry:
+### Step 5: (Optional) Pre-load the elbencho image into Minikube
+The chart uses the official image `breuner/elbencho:v3.3-3`, which Minikube pulls automatically.
+To pre-load it (e.g. for offline use):
 ```powershell
-.\minikube.exe image load rafmoshe2500/elbencho:3.1-5
+docker pull breuner/elbencho:v3.3-3
+.\minikube.exe image load breuner/elbencho:v3.3-3
 ```
 
 ### Step 6: Deploy the Helm Chart in Job Mode
@@ -57,13 +59,13 @@ Deploy the elbencho chart using the override configuration for the 100MB benchma
 ### Step 7: Verify Results
 1. Check the Pod execution status:
    ```powershell
-   kubectl get pods -l job-name=elbencho-job-job
+   kubectl get pods -l job-name=elbencho-job-job-r1
    ```
    *Expected Output: STATUS should be `Completed`.*
 
 2. Read the benchmark output logs:
    ```powershell
-   kubectl logs -l job-name=elbencho-job-job
+   kubectl logs -l job-name=elbencho-job-job-r1
    ```
    *Example Output:*
    ```

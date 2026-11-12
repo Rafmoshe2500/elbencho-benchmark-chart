@@ -1,0 +1,28 @@
+{{- if eq .Values.protocol "nfs" }}
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ include "elbencho.nfsPvName" . }}
+  labels:
+    {{- include "elbencho.labels" . | nindent 4 }}
+spec:
+  storageClassName: ""
+  volumeMode: Filesystem
+  capacity:
+    storage: {{ .Values.nfs.size | quote }}
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: {{ .Values.nfs.reclaimPolicy }}
+  # Reserve this PV for the chart's PVC only
+  claimRef:
+    namespace: {{ .Release.Namespace }}
+    name: {{ include "elbencho.fullname" . }}
+  {{- with .Values.nfs.mountOptions }}
+  mountOptions:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  nfs:
+    server: {{ .Values.nfs.server | quote }}
+    path: {{ .Values.nfs.path | quote }}
+    readOnly: {{ .Values.nfs.readOnly }}
+{{- end }}

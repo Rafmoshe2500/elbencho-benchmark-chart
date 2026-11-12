@@ -1,0 +1,10 @@
+mode: service
+protocol: s3
+replicaCount: 4
+s3:
+  endpoints: "http://minio.minio.svc:9000"
+  existingSecret: s3-creds
+serviceMode:
+  benchmark:
+    enabled: true
+    args: ["-d", "-w", "-r", "-t", "8", "-n", "1", "-N", "100", "-s", "16m", "-b", "16m", "elbencho-bucket"]

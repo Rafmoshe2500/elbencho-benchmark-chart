@@ -1,5 +1,5 @@
-{{- if and .Values.persistence.enabled .Values.persistence.create (not .Values.persistence.existingClaim) -}}
-{{- if ne .Values.mode "service" -}}
+{{- $fileOrBlock := and (has .Values.protocol (list "file" "block")) .Values.persistence.enabled .Values.persistence.create (not .Values.persistence.existingClaim) }}
+{{- if or (eq .Values.protocol "nfs") (and $fileOrBlock (not (include "elbencho.perPodClaims" .))) }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -7,6 +7,18 @@ metadata:
   labels:
     {{- include "elbencho.labels" . | nindent 4 }}
 spec:
+  {{- if eq .Values.protocol "nfs" }}
+  # Bind statically to the NFS PV created by this chart
+  storageClassName: ""
+  volumeName: {{ include "elbencho.nfsPvName" . }}
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: {{ .Values.nfs.size | quote }}
+  {{- else }}
+  volumeMode: {{ include "elbencho.volumeMode" . }}
   accessModes:
     {{- toYaml .Values.persistence.accessModes | nindent 4 }}
   resources:
@@ -15,5 +27,5 @@ spec:
   {{- if .Values.persistence.storageClass }}
   storageClassName: {{ .Values.persistence.storageClass | quote }}
   {{- end }}
-{{- end }}
+  {{- end }}
 {{- end }}

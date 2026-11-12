@@ -1,4 +1,4 @@
-{{- if eq .Values.mode "service" -}}
+{{- if eq .Values.mode "service" }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -6,12 +6,18 @@ metadata:
   labels:
     {{- include "elbencho.labels" . | nindent 4 }}
 spec:
-  type: {{ .Values.service.type }}
+  # Headless: gives each StatefulSet pod a DNS record <fullname>-<N>.<fullname>
+  clusterIP: None
+  # Publish DNS before readiness so the daemons can be resolved as soon as they start
+  publishNotReadyAddresses: true
   ports:
-    - port: {{ .Values.service.port }}
-      targetPort: service-port
+    {{- range $i := until (int (max 1 (int .Values.serviceMode.instancesPerPod))) }}
+    {{- $port := add (int $.Values.service.port) $i }}
+    - port: {{ $port }}
+      targetPort: {{ $port }}
       protocol: TCP
-      name: service-port
+      name: svc-{{ $port }}
+    {{- end }}
   selector:
     {{- include "elbencho.selectorLabels" . | nindent 4 }}
 {{- end }}

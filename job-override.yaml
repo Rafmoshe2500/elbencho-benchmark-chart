@@ -1,6 +1,4 @@
 mode: job
-image:
-  tag: "3.1-5"
 persistence:
   existingClaim: "local-pvc"
 job:
