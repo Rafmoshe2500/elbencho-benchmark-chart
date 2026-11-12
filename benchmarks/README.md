@@ -13,7 +13,7 @@ On Windows, use WSL or Git Bash.
 benchmarks/
 ├── nfs/  xfs/  raw-block/  s3/      one folder per protocol
 │   ├── profile.env                  protocol defaults (nconnect, StorageClass, endpoint, ...)
-│   └── 01-write-iops.sh ... 12-scaling-sweep.sh
+│   └── 01-write-iops.sh ... 15-ai-inference.sh   (tests that don't apply to a protocol are not there)
 ├── run-suite.sh                     run several tests in a row
 ├── cleanup.sh                       remove deployments / PVCs
 ├── lib/                             engine (run.sh) + test definitions per family
@@ -42,6 +42,11 @@ kubectl -n elbencho-bench create secret generic s3-creds \
 ./benchmarks/run-suite.sh xfs STORAGE_CLASS=my-xfs-sc PODS=4 DURATION=120
 ./benchmarks/run-suite.sh s3 TESTS="01 02 05" S3_ENDPOINT=... S3_SECRET_NAME=s3-creds
 
+# Queue-depth curve, AI training with async checkpoints, inference
+./benchmarks/xfs/13-iodepth-sweep.sh STORAGE_CLASS=my-xfs-sc PODS=4
+./benchmarks/nfs/14-ai-training.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export TRAIN_PRESET=unet3d CKPT_MODE=async PODS=8
+./benchmarks/s3/15-ai-inference.sh S3_ENDPOINT=... S3_SECRET_NAME=s3-creds MODEL_SIZE=140g PODS=16
+
 # Remove everything of a protocol (StatefulSet PVCs and NFS PVs included)
 ./benchmarks/cleanup.sh xfs
 ```
@@ -65,6 +70,13 @@ Arguments win over the environment, and both win over `profile.env` and the test
 | 10 | Latency at QD1 *(extra)* | 1 thread, iodepth 1, 4k random read + write, p99/p99.9/p99.99 | same | 1 thread PUT + GET |
 | 11 | Metadata *(extra)* | create / stat / delete of many empty files | n/a | PUT / LIST / HEAD / DELETE |
 | 12 | Scaling sweep *(extra)* | runs another test for `SWEEP_PODS="1 2 4 8"` (+ `SWEEP_NCONNECT` for NFS) and prints a table | same | same |
+| 13 | IODEPTH sweep | runs another test (default 02) for `SWEEP_IODEPTH="1 2 4 8 16 32 64 128"`: IOPS, MiB/s, avg + p99 latency per depth | same | n/a |
+| 14 | AI training | NFS: MLPerf-style epochs over a sample dataset + checkpoint + restore (see below) | n/a | same on S3 |
+| 15 | AI inference | NFS: model load at cold start + lookups + KV-cache offload (see below) | n/a | same on S3 |
+
+Tests 12 and 13 can be combined freely: `SWEEP_PODS`, `SWEEP_NCONNECT` and `SWEEP_IODEPTH` all work in both
+(12 defaults to a pod sweep, 13 to an iodepth sweep at the current `PODS`). The table shows where IOPS stop growing
+while p99 latency keeps rising.
 
 **Two layouts:**
 - **Tests 01–07 (multi):** every daemon has its **own** target, and the result is the total for the whole system.
@@ -133,6 +145,60 @@ Arguments win over the environment, and both win over `profile.env` and the test
 | `TPUT_OBJ_SIZE`, `TPUT_OBJECTS` | 256m, 4 | throughput tests |
 | `MIX_OBJECTS` | 20000 | size of the mixed-size dataset (tests 05–07) |
 
+## AI workloads (tests 14, 15)
+
+Both tests use **one shared dataset** for all pods, like a real training cluster or inference fleet: the NFS
+export (no per-pod sub dirs), or the bucket `<BUCKET_PREFIX>-ai`.
+
+### 14 – Training (MLPerf Storage / DLIO style)
+1. **Dataset:** `TRAIN_SAMPLES` files, one sample per file, written once.
+2. **Every epoch:** all pods read the **whole dataset in a new random order** (`--treerand`). The samples are
+   split between the pods (data parallel), with `TRAIN_THREADS` data-loader workers per pod.
+3. **Checkpoint** every `CKPT_EVERY` epochs: every pod writes its shard (`CKPT_SIZE` per pod, `CKPT_THREADS`
+   files) at the same time.
+   - `CKPT_MODE=sync`: training waits for the checkpoint.
+   - `CKPT_MODE=async`: the next epoch's reads run during the checkpoint write. This shows how much a background
+     checkpoint slows the data loading.
+4. **Restore:** all pods read the last checkpoint back (resume after a failure).
+5. **Optional accelerator emulation:** `TRAIN_REQUIRED_MIBS` = MiB/s that one pod's GPUs consume. The readers are
+   rate-limited to that, and the result shows the **keep-up %**. Below ~100% means the storage is the bottleneck.
+   This is the same idea as MLPerf's accelerator-utilization threshold.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `TRAIN_PRESET` | resnet50 | `resnet50` (115k samples), `cosmoflow` (2.8m), `unet3d` (147m): average MLPerf sample sizes. `custom` |
+| `TRAIN_SAMPLES` | per preset (100000 / 4000 / 80) | number of samples. **Make the dataset larger than the RAM/cache of the storage** |
+| `TRAIN_SAMPLE_SIZE` / `TRAIN_SIZE_MIX` | preset | fixed size, or a weighted mix like `64k:1,128k:2,256k:1` |
+| `EPOCHS` | 3 | |
+| `TRAIN_THREADS` | 8 | readers (data-loader workers) per pod |
+| `TRAIN_BS` | 1m (S3: 16m) | read request size |
+| `TRAIN_DIRECT` | 1 | O_DIRECT for NFS (no client cache) |
+| `TRAIN_REQUIRED_MIBS` | – | accelerator demand per pod → keep-up % |
+| `CKPT_SIZE`, `CKPT_THREADS`, `CKPT_BS` | 8g, 8, 4m (S3: 16m) | checkpoint shard per pod |
+| `CKPT_EVERY`, `CKPT_MODE`, `RESTORE` | 1, sync, 1 | |
+
+### 15 – Inference
+`INF_PHASES` (default `load lookup kvcache`) selects the phases:
+- **load (cold start):** every replica reads the **full model** (`MODEL_SIZE` in `MODEL_SHARDS` shards) at the same
+  time with `LOAD_THREADS` parallel readers, like model streamers do. Reports the **load time of the slowest
+  replica** and MiB/s per replica. The model is written once by a single pod.
+- **lookup:** small random reads at queue depth 1 in a shared index (RAG / embeddings / feature store).
+  - Files: block sizes from `LOOKUP_BS_MIX` (default `4k:1,16k:1,64k:1`) in `INDEX_SIZE`.
+  - S3: GETs of `LOOKUP_OBJ_SIZE` objects.
+  - Reports latency percentiles.
+- **kvcache:** KV-cache offload, 50/50 read/write of `KV_BS` (default 2m) chunks.
+
+| Key | Default |
+|---|---|
+| `MODEL_SIZE`, `MODEL_SHARDS`, `LOAD_THREADS`, `LOAD_BS`, `LOAD_DIRECT` | 16g, 4, 16, 4m (S3: 16m), 1 |
+| `INDEX_SIZE`, `LOOKUP_BS_MIX`, `LOOKUP_THREADS` | 8g, `4k:1,16k:1,64k:1`, 8 |
+| `LOOKUP_OBJ_SIZE`, `LOOKUP_OBJECTS` (S3) | 64k, 2000 per thread |
+| `KV_SIZE`, `KV_BS`, `KV_THREADS`, `KV_IODEPTH` | 16g, 2m, 8, 4 |
+| `KV_OBJECTS` (S3) | 200 per thread |
+
+The NFS daemons run two elbencho services per pod (ports 1611/1612), so that async checkpoints and S3 mixes can
+run two coordinated benchmarks at once.
+
 ## Results
 
 Each run writes `results/<protocol>/<NN-test>/<timestamp>/`:
@@ -142,6 +208,7 @@ Each run writes `results/<protocol>/<NN-test>/<timestamp>/`:
 - `params.env` + `values.yaml`: exactly what was run, so you can repeat it
 
 All runs are also appended to **`results/summary.csv`**, one row per phase, for comparing runs in Excel or Sheets.
+It includes the p99 latency, `nconnect`, iodepth, and the elapsed time of the slowest pod.
 
 Numbers are elbencho's **"first done"** values: the rate while all workers were still running (no tail effect).
 This is the right value for aggregate IOPS and throughput.

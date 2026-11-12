@@ -63,10 +63,17 @@ case "$TEST" in
   07) TNAME=mix70-256k-1m ;;
   08) TNAME=single-target-read-iops ;;  09) TNAME=single-target-write-iops ;;
   10) TNAME=latency-qd1 ;;         11) TNAME=metadata ;;
-  12) TNAME=scaling-sweep ;;
+  12) TNAME=scaling-sweep ;;       13) TNAME=iodepth-sweep ;;
+  14) TNAME=ai-training ;;         15) TNAME=ai-inference ;;
   *) die "unknown test id '$TEST'" ;;
 esac
-LAYOUT=multi; [[ $TEST == 08 || $TEST == 09 ]] && LAYOUT=single
+case "$TEST" in
+  11) [ "$FAMILY" != block ] || die "test 11 (metadata) needs a filesystem - not available for raw-block" ;;
+  13) [ "$FAMILY" != s3 ] || die "test 13 (iodepth sweep) is for nfs / xfs / raw-block" ;;
+  14|15) [ "$PROTO" = nfs ] || [ "$PROTO" = s3 ] || die "tests 14/15 (AI) are for nfs and s3 (shared datasets)" ;;
+esac
+# AI tests: one dataset shared by all pods (like a real training cluster / inference fleet)
+LAYOUT=multi; [[ $TEST == 08 || $TEST == 09 || $TEST == 14 || $TEST == 15 ]] && LAYOUT=single
 
 # Per-test defaults
 case "$TEST" in
@@ -90,23 +97,35 @@ if [ "$FAMILY" = s3 ]; then
 fi
 : "${DURATION:=60}"            # seconds per timed phase
 
-# --------------------------------------------------------------- sweep (12) --
-if [ "$TEST" = 12 ]; then
-  : "${SWEEP_TEST:=02}"
-  : "${SWEEP_PODS:=1 2 4 8}"
+# ------------------------------------------------------- sweeps (12, 13) ---
+# 12: pods (and NCONNECT / IODEPTH) sweep, 13: iodepth sweep at a fixed pod count.
+if [ "$TEST" = 12 ] || [ "$TEST" = 13 ]; then
+  if [ "$TEST" = 13 ]; then
+    : "${SWEEP_TEST:=02}"; : "${SWEEP_PODS:=$PODS}"; : "${SWEEP_IODEPTH:=1 2 4 8 16 32 64 128}"
+  else
+    : "${SWEEP_TEST:=02}"; : "${SWEEP_PODS:=1 2 4 8}"; : "${SWEEP_IODEPTH:=}"
+  fi
   : "${SWEEP_NCONNECT:=}"        # nfs only, e.g. "1 4 8 16"
-  [ "$SWEEP_TEST" != 12 ] || die "SWEEP_TEST cannot be 12"
+  case "$SWEEP_TEST" in 12|13|14|15) die "SWEEP_TEST must be one of 01..11" ;; esac
+  [ -z "$SWEEP_IODEPTH" ] || [ "$SWEEP_TEST" != 10 ] || die "test 10 is fixed at QD1 - sweep another test"
   SWEEP_ID=sweep-$(date +%Y%m%d-%H%M%S)
   for p in $SWEEP_PODS; do
     for n in ${SWEEP_NCONNECT:-_}; do
-      extra=(PODS="$p" SWEEP_ID="$SWEEP_ID")
-      [ "$n" != _ ] && extra+=(NCONNECT="$n")
-      log "sweep: test $SWEEP_TEST with ${extra[*]}"
-      "$0" "$PROTO" "$SWEEP_TEST" "${extra[@]}"
+      for q in ${SWEEP_IODEPTH:-_}; do
+        extra=(PODS="$p" SWEEP_ID="$SWEEP_ID")
+        [ "$n" != _ ] && extra+=(NCONNECT="$n")
+        [ "$q" != _ ] && extra+=(IODEPTH="$q")
+        log "sweep: test $SWEEP_TEST with ${extra[*]}"
+        "$0" "$PROTO" "$SWEEP_TEST" "${extra[@]}" || warn "sweep step failed: ${extra[*]}"
+      done
     done
   done
   log "sweep results ($SWEEP_ID):"
-  awk -F, -v id="$SWEEP_ID" 'NR==1 || ($NF==id && $9 !~ /^(prepare|mkbucket)/) { printf "%-6s %-5s %-8s %-8s %-6s %-26s %-10s %12s %12s %12s %10s %10s %10s\n", $5,$6,$7,$8,$4,$9,$10,$11,$12,$13,$14,$15,$16 }' "$RESULTS_DIR/summary.csv"
+  awk -F, -v id="$SWEEP_ID" '
+    NR==1 { for (i=1;i<=NF;i++) h[$i]=i
+            printf "%-5s %-8s %-7s %-7s %-7s %-11s %12s %10s %10s %10s %10s\n","pods","nconnect","threads","iodepth","block","operation","total_iops","MiB/s","rdMiB/s","lat_avg_us","p99_us"; next }
+    $(h["sweep_id"])==id && $(h["phase"]) !~ /^(prepare|mkbucket)/ {
+      printf "%-5s %-8s %-7s %-7s %-7s %-11s %12s %10s %10s %10s %10s\n", $(h["pods"]), $(h["nconnect"]), $(h["threads"]), $(h["iodepth"]), $(h["block"]), $(h["operation"]), $(h["total_iops"]), $(h["mib_s"]), $(h["read_mib_s"]), $(h["lat_avg_us"]), $(h["p99_us"]) }' "$RESULTS_DIR/summary.csv"
   exit 0
 fi
 
@@ -143,7 +162,8 @@ render_values() {
     echo "terminationGracePeriodSeconds: 5"
     [ -n "$IMAGE_REPO$IMAGE_TAG" ] && { echo "image:"; [ -n "$IMAGE_REPO" ] && echo "  repository: $IMAGE_REPO"; [ -n "$IMAGE_TAG" ] && echo "  tag: \"$IMAGE_TAG\""; }
     echo "serviceMode:"
-    echo "  instancesPerPod: $([ "$FAMILY" = s3 ] && echo 2 || echo 1)"
+    # 2 service instances: S3 mixes and async checkpoints run two coordinated elbencho runs at once
+    echo "  instancesPerPod: $([ "$FAMILY" = s3 ] || [ "$PROTO" = nfs ] && echo 2 || echo 1)"
     echo "  controller: {enabled: true}"
     if [ -n "$CPU$MEMORY" ]; then
       echo "resources:"
@@ -225,8 +245,8 @@ eb() {
 }
 fetch() { # copy result files of this run from the controller
   local f
-  for f in $(ctl "ls $REMOTE_DIR 2>/dev/null" || true); do
-    ctl "cat $REMOTE_DIR/$f" > "$RUN_DIR/$f"
+  for f in $(ctl "ls -tr $REMOTE_DIR 2>/dev/null" || true); do   # oldest first -> phase order kept
+    ctl "cat $REMOTE_DIR/$f" > "$RUN_DIR/$f"; sleep 0.01
   done
 }
 
@@ -241,12 +261,23 @@ need_prepare() { # kind signature
 # ---------------------------------------------------------------- summary ---
 summarize() {
   local f out="$RUN_DIR/summary.txt"
-  [ -f "$RESULTS_DIR/summary.csv" ] || echo "date,protocol,test,layout,pods,threads,iodepth,block,phase,operation,iops,read_iops,total_iops,mib_s,read_mib_s,lat_avg_us,read_lat_avg_us,run_dir,sweep_id" > "$RESULTS_DIR/summary.csv"
+  local hdr="date,protocol,test,layout,pods,nconnect,threads,iodepth,block,phase,operation,iops,read_iops,total_iops,mib_s,read_mib_s,lat_avg_us,read_lat_avg_us,p99_us,read_p99_us,elapsed_ms_last,run_dir,sweep_id"
+  if [ -f "$RESULTS_DIR/summary.csv" ] && [ "$(head -1 "$RESULTS_DIR/summary.csv")" != "$hdr" ]; then
+    mv "$RESULTS_DIR/summary.csv" "$RESULTS_DIR/summary-old-$RUN_ID.csv"   # older column layout
+  fi
+  [ -f "$RESULTS_DIR/summary.csv" ] || echo "$hdr" > "$RESULTS_DIR/summary.csv"
   {
     printf '%-14s %-10s %12s %12s %12s %10s %10s %11s %11s\n' PHASE OP IOPS RD-IOPS TOTAL-IOPS MiB/s RD-MiB/s LAT-us RD-LAT-us
     for f in $(ls -tr "$RUN_DIR"/*.csv 2>/dev/null); do
       [ -e "$f" ] || continue
-      awk -F, -v phase="$(basename "$f" .csv)" -v sum="$RESULTS_DIR/summary.csv" -v meta="$RUN_ID,$PROTO,$TEST-$TNAME,$LAYOUT,$PODS" -v dir="$RUN_DIR" -v sw="${SWEEP_ID:-}" '
+      # p99 per operation from the human readable result file: "OP w_p99 r_p99"
+      local p99s
+      p99s=$(awk '/^[A-Z]/{op=$1}
+        /IO (wr )?lat % us/ { if (match($0, / 99%<=[0-9]+/)) w[op]=substr($0,RSTART+6,RLENGTH-6) }
+        /IO rd lat % us/    { if (match($0, / 99%<=[0-9]+/)) r[op]=substr($0,RSTART+6,RLENGTH-6) }
+        END { for (o in w) printf "%s=%s:%s;", o, w[o], r[o] }' "${f%.csv}.txt" 2>/dev/null || true)
+      awk -F, -v phase="$(basename "$f" .csv)" -v sum="$RESULTS_DIR/summary.csv" -v meta="$RUN_ID,$PROTO,$TEST-$TNAME,$LAYOUT,$PODS,${NCONNECT:-}" -v dir="$RUN_DIR" -v sw="${SWEEP_ID:-}" -v p99s="$p99s" '
+        BEGIN { n=split(p99s, a, ";"); for (i=1;i<=n;i++) if (split(a[i], kv, "=")==2) { split(kv[2], wr, ":"); pw[kv[1]]=wr[1]; pr[kv[1]]=wr[2] } }
         NR==1 { for (i=1;i<=NF;i++) h[$i]=i; next }
         # [first] = all workers still running (stonewall). If that phase was too short to measure
         # (0 ms, elbencho prints a 1234567 placeholder) fall back to the [last] values.
@@ -258,7 +289,7 @@ summarize() {
           r=g("rwmix read IOPS [first]"); if (r=="") r=g("rwmix read entries/s [first]")
           tot=iops+r
           printf "%-14s %-10s %12s %12s %12s %10s %10s %11s %11s\n", phase, op, iops, (r==""?"-":r), tot, g("MiB/s [first]"), (r==""?"-":g("rwmix read MiB/s [first]")), g("IO lat us [avg]"), g("rwmix read IO lat us [avg]")
-          printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", meta, g("threads"), g("IO depth"), g("block size"), phase, op, iops, r, tot, g("MiB/s [first]"), g("rwmix read MiB/s [first]"), g("IO lat us [avg]"), g("rwmix read IO lat us [avg]"), dir, sw >> sum
+          printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", meta, g("threads"), g("IO depth"), g("block size"), phase, op, iops, r, tot, g("MiB/s [first]"), g("rwmix read MiB/s [first]"), g("IO lat us [avg]"), g("rwmix read IO lat us [avg]"), pw[op], pr[op], $(h["time ms [last]"]), dir, sw >> sum
         }' "$f"
     done
   } | tee "$out"
@@ -287,6 +318,8 @@ finish() {
 # ------------------------------------------------------- protocol tests -----
 # shellcheck disable=SC1090
 source "$BENCH_DIR/lib/tests-$FAMILY.sh"
+# shellcheck disable=SC1090
+case "$TEST" in 14|15) source "$BENCH_DIR/lib/tests-ai.sh" ;; esac   # overrides run_test
 
 deploy
 run_test
