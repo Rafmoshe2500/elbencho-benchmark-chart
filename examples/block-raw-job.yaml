@@ -1,0 +1,11 @@
+# RAW block device (volumeMode: Block, no filesystem). The StorageClass must support block volumes.
+# WARNING: writes destroy whatever is on the device.
+mode: job
+protocol: block
+persistence:
+  storageClass: my-block-storageclass
+  size: 100Gi
+  devicePath: /dev/elbencho
+job:
+  # -s must not exceed the device size. Do not use -d / --mkdirs on a device.
+  args: ["-w", "-r", "--direct", "-t", "8", "-s", "50g", "-b", "1m", "/dev/elbencho"]

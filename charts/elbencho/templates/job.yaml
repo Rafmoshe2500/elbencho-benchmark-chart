@@ -1,56 +1,33 @@
-{{- if eq .Values.mode "job" -}}
+{{- if eq .Values.mode "job" }}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "elbencho.fullname" . }}-job
+  # The revision suffix lets `helm upgrade` replace the Job (Job pod templates are immutable).
+  name: {{ include "elbencho.fullname" . }}-job-r{{ .Release.Revision }}
   labels:
     {{- include "elbencho.labels" . | nindent 4 }}
+    app.kubernetes.io/component: job
 spec:
+  backoffLimit: {{ .Values.job.backoffLimit }}
+  {{- if not (kindIs "invalid" .Values.job.ttlSecondsAfterFinished) }}
+  ttlSecondsAfterFinished: {{ .Values.job.ttlSecondsAfterFinished }}
+  {{- end }}
+  {{- if not (kindIs "invalid" .Values.job.activeDeadlineSeconds) }}
+  activeDeadlineSeconds: {{ .Values.job.activeDeadlineSeconds }}
+  {{- end }}
   template:
     metadata:
-      labels:
-        {{- include "elbencho.selectorLabels" . | nindent 8 }}
+      {{- include "elbencho.podMeta" . | trim | nindent 6 }}
     spec:
       restartPolicy: Never
-      {{- with .Values.imagePullSecrets }}
-      imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- include "elbencho.podCommon" (dict "ctx" . "withClaim" true) | trim | nindent 6 }}
       containers:
         - name: {{ .Chart.Name }}
-          securityContext:
-            {{- toYaml .Values.securityContext | nindent 12 }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          {{- if .Values.job.args }}
+          command: ["/usr/local/bin/elbencho"]
           args:
-            {{- toYaml .Values.job.args | nindent 12 }}
-          {{- end }}
-          resources:
-            {{- toYaml .Values.resources | nindent 12 }}
-          {{- if .Values.persistence.enabled }}
-          volumeMounts:
-            - name: {{ .Values.persistence.volumeName }}
-              mountPath: {{ .Values.persistence.mountPath }}
-          {{- end }}
-      {{- if .Values.persistence.enabled }}
-      volumes:
-        - name: {{ .Values.persistence.volumeName }}
-          persistentVolumeClaim:
-            claimName: {{ if .Values.persistence.existingClaim }}{{ .Values.persistence.existingClaim }}{{ else }}{{ include "elbencho.fullname" . }}{{- end }}
-      {{- end }}
-      {{- with .Values.nodeSelector }}
-      nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.affinity }}
-      affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.tolerations }}
-      tolerations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+            {{- with include "elbencho.s3Args" . | trim }}
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- include "elbencho.quoteList" .Values.job.args | trim | nindent 12 }}
+          {{- include "elbencho.containerCommon" . | trim | nindent 10 }}
 {{- end }}

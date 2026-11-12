@@ -1,0 +1,22 @@
+# NFS export shared by all daemons (static PV created by the chart, no CSI driver needed).
+# Alternative: protocol=file + an NFS StorageClass (csi-driver-nfs / nfs-subdir) with accessModes [ReadWriteMany].
+mode: service
+protocol: nfs
+replicaCount: 4
+nfs:
+  server: 10.0.0.10
+  path: /export/bench
+  mountOptions: ["nfsvers=4.1", "nconnect=8", "rsize=1048576", "wsize=1048576", "hard"]
+affinity:   # spread the clients over different nodes
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels: {app.kubernetes.io/name: elbencho}
+serviceMode:
+  benchmark:
+    enabled: true
+    # Many-files test: each daemon/thread gets its own rank dir (r0, r1, ...) under /data
+    args: ["-d", "-w", "-r", "-t", "8", "-n", "4", "-N", "100", "-s", "4m", "-b", "1m", "/data"]

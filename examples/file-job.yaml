@@ -1,0 +1,8 @@
+# Filesystem PVC from any StorageClass (EBS/PD/Ceph/Longhorn/local...). Large-file write+read with O_DIRECT.
+mode: job
+protocol: file
+persistence:
+  storageClass: ""          # "" = cluster default
+  size: 20Gi
+job:
+  args: ["-w", "-r", "--direct", "-t", "8", "-s", "10g", "-b", "1m", "/data/testfile"]

@@ -1,4 +1,4 @@
-{{- if eq .Values.mode "service" -}}
+{{- if eq .Values.mode "service" }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -8,68 +8,43 @@ metadata:
 spec:
   serviceName: {{ include "elbencho.fullname" . }}
   replicas: {{ .Values.replicaCount }}
+  # Start all daemons at once instead of one by one
+  podManagementPolicy: Parallel
   selector:
     matchLabels:
       {{- include "elbencho.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      labels:
-        {{- include "elbencho.selectorLabels" . | nindent 8 }}
+      {{- include "elbencho.podMeta" . | trim | nindent 6 }}
     spec:
-      {{- with .Values.imagePullSecrets }}
-      imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- include "elbencho.podCommon" (dict "ctx" . "withClaim" (not (include "elbencho.perPodClaims" .))) | trim | nindent 6 }}
       containers:
         - name: {{ .Chart.Name }}
-          securityContext:
-            {{- toYaml .Values.securityContext | nindent 12 }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          {{- if .Values.serviceMode.command }}
-          command:
-            {{- toYaml .Values.serviceMode.command | nindent 12 }}
-          {{- end }}
-          {{- if .Values.serviceMode.args }}
+          command: ["/usr/local/bin/elbencho"]
           args:
-            {{- toYaml .Values.serviceMode.args | nindent 12 }}
-          {{- end }}
+            # --foreground is required: without it elbencho daemonizes and the container exits.
+            - "--service"
+            - "--foreground"
+            - "--port"
+            - {{ .Values.service.port | quote }}
+            {{- with .Values.serviceMode.extraArgs }}
+            {{- include "elbencho.quoteList" . | trim | nindent 12 }}
+            {{- end }}
           ports:
             - name: service-port
               containerPort: {{ .Values.service.port }}
               protocol: TCP
-          resources:
-            {{- toYaml .Values.resources | nindent 12 }}
-          {{- if .Values.persistence.enabled }}
-          volumeMounts:
-            - name: {{ .Values.persistence.volumeName }}
-              mountPath: {{ .Values.persistence.mountPath }}
-          {{- end }}
-      {{- if and .Values.persistence.enabled .Values.persistence.existingClaim }}
-      volumes:
-        - name: {{ .Values.persistence.volumeName }}
-          persistentVolumeClaim:
-            claimName: {{ .Values.persistence.existingClaim }}
-      {{- end }}
-      {{- with .Values.nodeSelector }}
-      nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.affinity }}
-      affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.tolerations }}
-      tolerations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-  {{- if and .Values.persistence.enabled .Values.persistence.create (not .Values.persistence.existingClaim) }}
+          readinessProbe:
+            tcpSocket:
+              port: service-port
+            periodSeconds: 5
+          {{- include "elbencho.containerCommon" . | trim | nindent 10 }}
+  {{- if include "elbencho.perPodClaims" . }}
   volumeClaimTemplates:
     - metadata:
         name: {{ .Values.persistence.volumeName }}
       spec:
+        volumeMode: {{ include "elbencho.volumeMode" . }}
         accessModes:
           {{- toYaml .Values.persistence.accessModes | nindent 10 }}
         resources:

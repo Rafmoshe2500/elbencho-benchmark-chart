@@ -57,13 +57,13 @@ Deploy the elbencho chart using the override configuration for the 100MB benchma
 ### Step 7: Verify Results
 1. Check the Pod execution status:
    ```powershell
-   kubectl get pods -l job-name=elbencho-job-job
+   kubectl get pods -l job-name=elbencho-job-job-r1
    ```
    *Expected Output: STATUS should be `Completed`.*
 
 2. Read the benchmark output logs:
    ```powershell
-   kubectl logs -l job-name=elbencho-job-job
+   kubectl logs -l job-name=elbencho-job-job-r1
    ```
    *Example Output:*
    ```

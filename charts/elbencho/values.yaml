@@ -1,7 +1,7 @@
 # Default values for elbencho.
 # This is a YAML-formatted file.
 
-# -- Number of replica pods to deploy (used in 'standalone' and 'service' modes)
+# -- Number of replica pods (used in 'standalone' and 'service' modes)
 replicaCount: 1
 
 image:
@@ -10,98 +10,166 @@ image:
   # -- Image pull policy
   pullPolicy: IfNotPresent
   # -- Overrides the image tag (defaults to the chart appVersion)
-  tag: "3.1-5"
+  tag: ""
 
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
-# -- Operating mode for elbencho.
-# Options:
-#   - 'standalone': Deploys a pod that sleeps (tail -f /dev/null) allowing you to execute interactive commands inside the container.
-#   - 'service': Runs elbencho as a daemon listener (`elbencho --service`) in a StatefulSet, enabling multi-node distributed benchmarking.
-#   - 'job': Runs a one-time Kubernetes Job executing a pre-defined benchmark command and then terminates.
+# -- Operating mode.
+#   - standalone: Deployment that idles, so you can `kubectl exec` in and run elbencho by hand.
+#   - service:    StatefulSet of `elbencho --service` daemons + headless Service, for distributed
+#                 benchmarks (`elbencho --hosts ...`). Optionally runs a coordinator Job for you.
+#   - job:        One-shot Kubernetes Job that runs `elbencho <job.args>` and exits.
 mode: standalone
 
-# -- Command and arguments to run when mode is 'job'
+# -- Storage protocol under test. Controls how storage is attached to the pods.
+#   - file:  A PVC mounted as a filesystem at persistence.mountPath. Works with ANY backend that
+#            has a StorageClass (local disk, EBS/PD, Ceph RBD+fs, CephFS, NFS CSI, Longhorn...).
+#   - nfs:   The chart creates a static NFS PersistentVolume (+PVC) pointing at nfs.server:nfs.path,
+#            with your mount options, and mounts it at persistence.mountPath. No CSI driver needed.
+#   - block: A PVC with volumeMode: Block, attached as a RAW device at persistence.devicePath
+#            (no filesystem). Benchmark the device path directly, e.g. `elbencho -w --direct ... /dev/elbencho`.
+#   - s3:    No volume. S3 endpoint/credentials are injected as env vars; benchmark paths are bucket names.
+protocol: file
+
+# -- Settings for job mode
 job:
-  # -- Args passed to the elbencho CLI inside the Job.
-  # For example: ["-t", "4", "-s", "1g", "-b", "1m", "-w", "/data"]
-  # This runs a write benchmark with 4 threads, 1GB file size, and 1MB block size on /data.
+  # -- Arguments passed to elbencho. Every item is quoted automatically, so numbers are safe.
+  # Examples per protocol:
+  #   file/nfs: ["-w", "-t", "4", "-s", "1g", "-b", "1m", "/data/testfile"]
+  #   block:    ["-w", "-r", "--direct", "-t", "4", "-s", "1g", "-b", "1m", "/dev/elbencho"]
+  #   s3:       ["-d", "-w", "-r", "-t", "4", "-n", "1", "-N", "16", "-s", "1m", "-b", "1m", "mybucket"]
   args:
+    - "-w"
+    - "-r"
     - "-t"
     - "4"
     - "-s"
     - "1g"
     - "-b"
     - "1m"
-    - "-w"
-    - "/data"
+    - "/data/elbencho-testfile"
+  # -- Number of retries before the Job is marked failed (benchmarks usually should not be retried)
+  backoffLimit: 0
+  # -- Automatically delete the finished Job after N seconds (null = keep it so logs stay readable)
+  ttlSecondsAfterFinished: null
+  # -- Hard time limit for the Job in seconds (null = no limit)
+  activeDeadlineSeconds: null
 
-# -- Command and arguments to run when mode is 'standalone'.
-# By default, sleeps forever so you can run benchmarks interactively.
+# -- Settings for standalone mode. The default idles forever but exits immediately on SIGTERM.
 standalone:
-  command: ["tail", "-f", "/dev/null"]
+  command: ["/bin/bash", "-c", "trap 'exit 0' TERM INT; sleep infinity & wait"]
   args: []
 
-# -- Command and arguments to run when mode is 'service'.
-# By default, runs as a daemon service on port 27123.
+# -- Settings for service mode
 serviceMode:
-  command: ["/usr/local/bin/elbencho"]
-  args: ["--service"]
+  # -- Extra args for the daemons. `--service --foreground --port <service.port>` are always set.
+  extraArgs: []
+  # -- Optional coordinator Job that waits for all daemons and then runs
+  # `elbencho --hosts <all replicas> <benchmark.args>`.
+  benchmark:
+    enabled: false
+    # -- Args for the coordinated run. Paths are resolved on each daemon (its own volume / bucket).
+    args:
+      - "-w"
+      - "-r"
+      - "-t"
+      - "4"
+      - "-s"
+      - "1g"
+      - "-b"
+      - "1m"
+      - "/data/elbencho-testfile"
+    backoffLimit: 0
+    ttlSecondsAfterFinished: null
 
-# -- Configuration for storage persistence
+# -- Storage attachment for protocol 'file' and 'block' (mountPath is also used by 'nfs')
 persistence:
-  # -- If true, a volume is mounted to the pod
+  # -- Attach storage to the pod (ignored for s3; always on for nfs)
   enabled: true
-  # -- If set, mounts an existing PVC with this name
+  # -- Use an existing PVC with this name (shared by all pods). For 'block' the PVC must be volumeMode: Block.
   existingClaim: ""
-  # -- If true (and existingClaim is empty), dynamically creates a new PVC
+  # -- Create a PVC when existingClaim is empty. In service mode every pod gets its own PVC
+  # (volumeClaimTemplates); use an existing RWX claim if all daemons should share one volume.
   create: true
-  # -- Storage Class to use for the new PVC (omit to use default storage class)
+  # -- StorageClass for the new PVC ("" = cluster default)
   storageClass: ""
   # -- Access modes for the PVC
   accessModes:
     - ReadWriteOnce
   # -- Size of the PVC to create
   size: 10Gi
-  # -- Mount path inside the container where elbencho will run tests
+  # -- Mount path inside the container (file / nfs)
   mountPath: /data
+  # -- Device path inside the container (block)
+  devicePath: /dev/elbencho
   # -- Name of the volume
   volumeName: elbencho-storage
 
-# -- Kubernetes Service configuration (used when mode is 'service')
+# -- Settings for protocol 'nfs'. The chart creates a cluster-scoped PV + a PVC bound to it.
+nfs:
+  # -- NFS server hostname or IP (required for protocol nfs)
+  server: ""
+  # -- Exported path on the server
+  path: /
+  # -- NFS mount options, e.g. ["nfsvers=4.1", "nconnect=8", "rsize=1048576", "wsize=1048576", "hard"]
+  mountOptions:
+    - nfsvers=4.1
+  # -- Mount read-only (read benchmarks only)
+  readOnly: false
+  # -- Nominal capacity written on the PV/PVC (NFS does not enforce it)
+  size: 100Gi
+  # -- Reclaim policy of the PV. Retain never deletes data on the server.
+  reclaimPolicy: Retain
+
+# -- Settings for protocol 's3'. Values are exposed as AWS_* env vars in the container, and (autoArgs)
+# passed to elbencho as --s3endpoints/--s3region/--s3key/--s3secret in job & coordinator runs.
+s3:
+  # -- Prepend the S3 connection flags to job.args / serviceMode.benchmark.args automatically
+  autoArgs: true
+  # -- Comma-separated S3 endpoint URL(s), e.g. "http://minio.minio.svc:9000" (-> AWS_ENDPOINT_URL)
+  endpoints: ""
+  # -- Region (-> AWS_REGION). Leave empty for most on-prem endpoints.
+  region: ""
+  # -- Name of an existing Secret holding the credentials (recommended)
+  existingSecret: ""
+  # -- Key in the Secret holding the access key
+  accessKeySecretKey: AWS_ACCESS_KEY_ID
+  # -- Key in the Secret holding the secret key
+  secretKeySecretKey: AWS_SECRET_ACCESS_KEY
+  # -- Access key (only used when existingSecret is empty; the chart creates a Secret)
+  accessKey: ""
+  # -- Secret key (only used when existingSecret is empty; the chart creates a Secret)
+  secretKey: ""
+
+# -- Kubernetes Service configuration (service mode). The Service is headless so every daemon gets
+# a stable DNS name: <fullname>-<N>.<fullname>
 service:
-  type: ClusterIP
   port: 27123
+
+# -- Extra environment variables for the elbencho container
+extraEnv: []
+# -- Extra volumes for the pod (e.g. a ConfigMap with a hosts file or a second test volume)
+extraVolumes: []
+# -- Extra volumeMounts for the elbencho container
+extraVolumeMounts: []
+
+# -- Extra pod annotations / labels
+podAnnotations: {}
+podLabels: {}
+
+# -- Seconds Kubernetes waits for the pod to stop
+terminationGracePeriodSeconds: 10
 
 # -- Resource limits and requests for the elbencho container
 resources: {}
-  # limits:
-  #   cpu: 100m
-  #   memory: 128Mi
-  # requests:
-  #   cpu: 100m
-  #   memory: 128Mi
 
-# -- Node selector configuration
 nodeSelector: {}
-
-# -- Tolerations configuration
 tolerations: []
-
-# -- Affinity configuration
 affinity: {}
 
 # -- Security context for the pod
 podSecurityContext: {}
-  # fsGroup: 2000
-
 # -- Security context for the elbencho container
 securityContext: {}
-  # capabilities:
-  #   drop:
-  #   - ALL
-  # readOnlyRootFilesystem: true
-  # runAsNonRoot: true
-  # runAsUser: 1000

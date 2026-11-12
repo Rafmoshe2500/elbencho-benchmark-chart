@@ -1,4 +1,4 @@
-{{- if eq .Values.mode "standalone" -}}
+{{- if eq .Values.mode "standalone" }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,57 +7,28 @@ metadata:
     {{- include "elbencho.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  {{- if include "elbencho.hasStorage" . }}
+  # A volume is usually RWO: never run old and new pod at the same time.
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "elbencho.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      labels:
-        {{- include "elbencho.selectorLabels" . | nindent 8 }}
+      {{- include "elbencho.podMeta" . | trim | nindent 6 }}
     spec:
-      {{- with .Values.imagePullSecrets }}
-      imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- include "elbencho.podCommon" (dict "ctx" . "withClaim" true) | trim | nindent 6 }}
       containers:
         - name: {{ .Chart.Name }}
-          securityContext:
-            {{- toYaml .Values.securityContext | nindent 12 }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          {{- if .Values.standalone.command }}
+          {{- with .Values.standalone.command }}
           command:
-            {{- toYaml .Values.standalone.command | nindent 12 }}
+            {{- include "elbencho.quoteList" . | trim | nindent 12 }}
           {{- end }}
-          {{- if .Values.standalone.args }}
+          {{- with .Values.standalone.args }}
           args:
-            {{- toYaml .Values.standalone.args | nindent 12 }}
+            {{- include "elbencho.quoteList" . | trim | nindent 12 }}
           {{- end }}
-          resources:
-            {{- toYaml .Values.resources | nindent 12 }}
-          {{- if .Values.persistence.enabled }}
-          volumeMounts:
-            - name: {{ .Values.persistence.volumeName }}
-              mountPath: {{ .Values.persistence.mountPath }}
-          {{- end }}
-      {{- if .Values.persistence.enabled }}
-      volumes:
-        - name: {{ .Values.persistence.volumeName }}
-          persistentVolumeClaim:
-            claimName: {{ if .Values.persistence.existingClaim }}{{ .Values.persistence.existingClaim }}{{ else }}{{ include "elbencho.fullname" . }}{{- end }}
-      {{- end }}
-      {{- with .Values.nodeSelector }}
-      nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.affinity }}
-      affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.tolerations }}
-      tolerations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+          {{- include "elbencho.containerCommon" . | trim | nindent 10 }}
 {{- end }}

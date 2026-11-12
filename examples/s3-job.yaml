@@ -1,0 +1,11 @@
+# S3 / object storage. Endpoint + credentials are passed to elbencho automatically.
+# kubectl create secret generic s3-creds --from-literal=AWS_ACCESS_KEY_ID=... --from-literal=AWS_SECRET_ACCESS_KEY=...
+mode: job
+protocol: s3
+s3:
+  endpoints: "http://minio.minio.svc:9000"
+  region: "us-east-1"
+  existingSecret: s3-creds
+job:
+  # -d creates the bucket. Keep -b == -s, or -b >= 5m: S3 multipart parts must be >= 5 MiB.
+  args: ["-d", "-w", "-r", "-t", "8", "-n", "1", "-N", "100", "-s", "4m", "-b", "4m", "elbencho-bucket"]

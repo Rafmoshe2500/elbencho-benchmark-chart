@@ -1,0 +1,55 @@
+{{- if and (eq .Values.mode "service") .Values.serviceMode.benchmark.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "elbencho.fullname" . }}-coordinator-r{{ .Release.Revision }}
+  labels:
+    {{- include "elbencho.labels" . | nindent 4 }}
+    app.kubernetes.io/component: coordinator
+spec:
+  backoffLimit: {{ .Values.serviceMode.benchmark.backoffLimit }}
+  {{- if not (kindIs "invalid" .Values.serviceMode.benchmark.ttlSecondsAfterFinished) }}
+  ttlSecondsAfterFinished: {{ .Values.serviceMode.benchmark.ttlSecondsAfterFinished }}
+  {{- end }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "elbencho.name" . }}-coordinator
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: coordinator
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: coordinator
+          image: {{ include "elbencho.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- $env := include "elbencho.env" . | trim }}
+          env:
+            - name: ELBENCHO_HOSTS
+              value: {{ include "elbencho.hostList" . | quote }}
+            {{- if $env }}
+            {{- $env | nindent 12 }}
+            {{- end }}
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              for hp in ${ELBENCHO_HOSTS//,/ }; do
+                h=${hp%:*}; p=${hp##*:}
+                echo "waiting for elbencho service $h:$p ..."
+                until (exec 3<>/dev/tcp/$h/$p) 2>/dev/null; do sleep 2; done
+              done
+              echo "all services up, starting benchmark"
+              exec /usr/local/bin/elbencho --hosts "$ELBENCHO_HOSTS" "$@"
+            - elbencho-coordinator
+          args:
+            {{- with include "elbencho.s3Args" . | trim }}
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- include "elbencho.quoteList" .Values.serviceMode.benchmark.args | trim | nindent 12 }}
+{{- end }}

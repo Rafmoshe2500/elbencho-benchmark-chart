@@ -1,0 +1,36 @@
+elbencho deployed: mode={{ .Values.mode }}, protocol={{ .Values.protocol }}
+{{- $fn := include "elbencho.fullname" . }}
+{{- $target := "/data/testfile" }}
+{{- if eq .Values.protocol "block" }}{{ $target = .Values.persistence.devicePath }}{{ end }}
+{{- if eq .Values.protocol "s3" }}{{ $target = "<bucket>" }}{{ end }}
+{{- $s3 := "" }}
+{{- if eq .Values.protocol "s3" }}{{ $s3 = "--s3endpoints \"$AWS_ENDPOINT_URL\" --s3key \"$AWS_ACCESS_KEY_ID\" --s3secret \"$AWS_SECRET_ACCESS_KEY\" " }}{{ end }}
+
+Storage under test:
+{{- if eq .Values.protocol "file" }}  filesystem PVC mounted at {{ .Values.persistence.mountPath }}
+{{- else if eq .Values.protocol "nfs" }}  NFS {{ .Values.nfs.server }}:{{ .Values.nfs.path }} mounted at {{ .Values.persistence.mountPath }} (options: {{ join "," .Values.nfs.mountOptions }})
+{{- else if eq .Values.protocol "block" }}  RAW block device at {{ .Values.persistence.devicePath }} (use --direct, never --mkdirs/-d)
+{{- else }}  S3 endpoint {{ .Values.s3.endpoints | default "(AWS default)" }} - benchmark paths are bucket names
+{{- end }}
+
+{{- if eq .Values.mode "standalone" }}
+
+Run a benchmark interactively:
+  kubectl exec -it -n {{ .Release.Namespace }} deploy/{{ $fn }} -- bash
+  elbencho {{ $s3 }}-w -r -t 4 -s 1g -b 1m {{ if eq .Values.protocol "block" }}--direct {{ end }}{{ $target }}
+{{- else if eq .Values.mode "job" }}
+
+Follow the benchmark output:
+  kubectl logs -n {{ .Release.Namespace }} -f job/{{ $fn }}-job-r{{ .Release.Revision }}
+{{- else }}
+
+Daemons: {{ include "elbencho.hostList" . }}
+{{- if .Values.serviceMode.benchmark.enabled }}
+Coordinator output:
+  kubectl logs -n {{ .Release.Namespace }} -f job/{{ $fn }}-coordinator-r{{ .Release.Revision }}
+{{- else }}
+Run a coordinated benchmark from any daemon pod:
+  kubectl exec -it -n {{ .Release.Namespace }} {{ $fn }}-0 -- \
+    elbencho {{ $s3 }}--hosts {{ include "elbencho.hostList" . }} -w -r -t 4 -s 1g -b 1m {{ $target }}
+{{- end }}
+{{- end }}
