@@ -308,6 +308,22 @@ Check whether a filter is active in a pod: `grep Seccomp /proc/1/status` shows `
   SCC with `seccompProfiles: ["*"]`), which is a cluster admin decision.
 - Check the result: the pod should then show `Seccomp: 0`, and the log line `async IO (libaio) works in the pods`.
 
+## Only some of the pods come up
+
+After a change of pod settings (`HELM_ARGS`, `CPU`, `NCONNECT`, ...) a plain StatefulSet replaces its pods one at a time and stops
+at the first one that cannot start, so you see one new pod and the rest unchanged. The runner avoids this: when
+the settings change, it restarts all daemons at once. If pods still do not become ready within `WAIT_TIMEOUT`
+(default 10m), it prints the pod states and the latest warning events, which name the reason:
+
+| Event | Meaning |
+|---|---|
+| `FailedCreate` on the StatefulSet: `unable to validate against any security context constraint` | OpenShift SCC. The service account of the pods may not use what they ask for (for example `seccompProfile: Unconfined`). Grant a suitable SCC to the account the pods run as |
+| `FailedScheduling` | `SPREAD=required` needs one node per daemon; also `NODE_SELECTOR`, taints, CPU/memory requests |
+| `FailedMount` / pending PVC | StorageClass or NFS mount problem |
+
+By hand: `oc -n elbencho-bench get events --sort-by=.lastTimestamp | tail -20` and `oc -n elbencho-bench describe sts eb-nfs-elbencho`.
+`oc -n elbencho-bench delete pod -l app.kubernetes.io/name=elbencho` restarts all daemons at once.
+
 ## Caveats
 - **Stale dataset markers.** Datasets are prepared once and marked on the StatefulSet. If the data was deleted outside
   the suite (bucket emptied, export wiped), reads fail. Run once with `PREPARE=always`.

@@ -233,21 +233,49 @@ render_values() {
 }
 
 # ------------------------------------------------------------- deployment ---
+# Why pods do not come up: pod states and the latest warning events (SCC/PodSecurity "forbidden" errors are
+# events of the StatefulSet, scheduling and image problems are events of the pods).
+deploy_diag() {
+  echo "--- pods of $REL:" >&2
+  $K get pods -l app.kubernetes.io/instance="$REL" >&2 || true
+  echo "--- latest warning events of $REL:" >&2
+  $K get events --field-selector type=Warning --sort-by=.lastTimestamp -o go-template='{{range .items}}{{.involvedObject.kind}}/{{.involvedObject.name}} {{.reason}}: {{.message}}{{"\n"}}{{end}}' 2>/dev/null \
+    | grep -F "$FULL" | tail -6 >&2 || true
+}
+
+# A StatefulSet replaces its pods ONE AT A TIME after a pod-template change (new HELM_ARGS, CPU, NCONNECT...),
+# even with podManagementPolicy Parallel, and stops at the first pod that does not become ready. Here all daemons
+# are restarted at once instead (they hold no state), so a change costs seconds, not minutes.
+restart_daemons_at_once() {
+  local i gen obs cur upd
+  for i in $(seq 1 30); do   # wait until the controller has seen the new spec
+    gen=$($K get "statefulset/$FULL" -o jsonpath='{.metadata.generation}' 2>/dev/null || true)
+    obs=$($K get "statefulset/$FULL" -o jsonpath='{.status.observedGeneration}' 2>/dev/null || true)
+    [ -n "$gen" ] && [ "$gen" = "$obs" ] && break; sleep 1
+  done
+  cur=$($K get "statefulset/$FULL" -o jsonpath='{.status.currentRevision}' 2>/dev/null || true)
+  upd=$($K get "statefulset/$FULL" -o jsonpath='{.status.updateRevision}' 2>/dev/null || true)
+  if [ -n "$cur" ] && [ "$cur" != "$upd" ]; then
+    log "pod settings changed: restarting all $PODS daemons at once"
+    $K delete pod -l "app.kubernetes.io/name=elbencho,app.kubernetes.io/instance=$REL" --wait=false >/dev/null
+  fi
+}
+
 deploy() {
   kubectl get namespace "$NAMESPACE" >/dev/null 2>&1 || kubectl create namespace "$NAMESPACE" >/dev/null
   if declare -F profile_predeploy >/dev/null; then profile_predeploy; fi
   render_values
   log "deploying $REL ($PODS daemons, layout=$LAYOUT) in namespace $NAMESPACE"
+  # no --wait: the readiness wait is done below, after the daemons have been restarted at once
   # shellcheck disable=SC2086
   helm upgrade --install "$REL" "$CHART" -n "$NAMESPACE" --create-namespace -f "$VALUES" \
-       --wait --timeout "$WAIT_TIMEOUT" $HELM_ARGS >> "$RUN_DIR/console.log" 2>&1 \
-    || { tail -5 "$RUN_DIR/console.log" >&2; $K get pods,pvc -l app.kubernetes.io/instance="$REL" >&2
-         echo "--- latest warning events of $REL:" >&2
-         $K get events --field-selector type=Warning --sort-by=.lastTimestamp -o go-template='{{range .items}}{{.involvedObject.kind}}/{{.involvedObject.name}} {{.reason}}: {{.message}}{{"\n"}}{{end}}' 2>/dev/null \
-           | grep -F "$FULL" | tail -4 >&2
-         die "helm deploy failed (see above)"; }
-  $K rollout status "statefulset/$FULL" --timeout "$WAIT_TIMEOUT" >/dev/null
-  $K rollout status "$CTL" --timeout "$WAIT_TIMEOUT" >/dev/null
+       --timeout "$WAIT_TIMEOUT" $HELM_ARGS >> "$RUN_DIR/console.log" 2>&1 \
+    || { tail -5 "$RUN_DIR/console.log" >&2; deploy_diag; die "helm deploy failed (see above)"; }
+  restart_daemons_at_once
+  $K rollout status "statefulset/$FULL" --timeout "$WAIT_TIMEOUT" >/dev/null 2>&1 \
+    || { deploy_diag; die "the $PODS daemons did not become ready within $WAIT_TIMEOUT (see above)"; }
+  $K rollout status "$CTL" --timeout "$WAIT_TIMEOUT" >/dev/null 2>&1 \
+    || { deploy_diag; die "the controller pod did not become ready within $WAIT_TIMEOUT (see above)"; }
   if [ "$FAMILY" = file ] && [ -n "${EXPECT_FS:-}" ]; then
     local fs; fs=$($K exec "$FULL-0" -c elbencho -- stat -f -c %T /data 2>/dev/null || true)
     [ "$fs" = "$EXPECT_FS" ] || warn "/data in the pods is '$fs', expected '$EXPECT_FS' - check the StorageClass!"
