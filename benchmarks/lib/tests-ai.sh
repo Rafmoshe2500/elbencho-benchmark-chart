@@ -133,6 +133,10 @@ inference_test() {
   : "${KV_OBJECTS:=200}"             # KV on S3: objects per thread
   : "${KV_THREADS:=8}"
   : "${KV_IODEPTH:=4}"
+  if [ "${AIO_EMULATE:-0}" = 1 ]; then
+    k0="$KV_THREADS x $KV_IODEPTH"; aio_emulate KV_THREADS KV_IODEPTH
+    [ "$KV_IODEPTH" = 1 ] && log "emulating async IO for the KV cache: KV_THREADS x KV_IODEPTH = $k0 -> KV_THREADS=$KV_THREADS KV_IODEPTH=1"
+  fi
   ai_mkbucket
   local shard=$(( $(to_bytes "$MODEL_SIZE") / MODEL_SHARDS / 1048576 * 1048576 ))
   local p

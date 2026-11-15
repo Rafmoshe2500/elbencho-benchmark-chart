@@ -319,6 +319,7 @@ footer .wrap { padding-block: 18px; }
         <tr><td class="k">STORAGE_CACHE</td><td class="k">–</td><td>ה-cache של מערכת ה-storage (DRAM/NVRAM של הבקרים ו-SSD cache), למשל <code>512g</code>. לא ה-RAM של הפוד</td></tr>
         <tr><td class="k">CACHE_FACTOR / CACHE_CHECK</td><td class="k">2 / warn</td><td>ה-dataset צריך להיות לפחות פי CACHE_FACTOR מה-cache. warn מזהיר, fail עוצר לפני הפריסה, off מכבה</td></tr>
         <tr><td class="k">BLOCKVARPCT</td><td class="k">– (100)</td><td>תוכן הנתונים שנכתבים: 100 לא נדחס, 50 נדחס 2:1, 0 כפילויות (dedup)</td></tr>
+        <tr><td class="k">AIO</td><td class="k">auto</td><td>IO אסינכרוני (libaio, כש-IODEPTH גדול מ-1) ב-NFS/XFS/Block. auto בודק פעם אחת בפוד, ואם הקלאסטר חוסם אותו (seccomp) עובר אוטומטית ל-THREADS × IODEPTH threads עם IODEPTH=1. emulate תמיד כך, native בלי בדיקה. השגיאה: <code>io_getevents failed ... Operation not permitted</code></td></tr>
         <tr><td class="k">DETACH / POLL</td><td class="k">1 / 5</td><td>הבדיקה רצה מנותקת בתוך ה-controller ושורדת נפילת VPN או SSH. הפלט נמשך כל POLL שניות. Ctrl+C עוצר גם את הבדיקה בקלאסטר</td></tr>
       </tbody>
     </table></div>

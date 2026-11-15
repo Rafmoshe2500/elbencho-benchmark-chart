@@ -120,6 +120,7 @@ while p99 latency keeps rising.
 | `STORAGE_CACHE` | – | cache of the **storage system**: controller DRAM/NVRAM + SSD cache, e.g. `512g`. Not the pod's or node's RAM (`--direct` bypasses that). See "Dataset vs. storage cache" |
 | `CACHE_FACTOR` / `CACHE_CHECK` | 2 / warn | required dataset ≥ factor × cache; `warn`, `fail` (stop before deploying) or `off` |
 | `BLOCKVARPCT` | – (elbencho default 100) | content of written data, see "Data reduction" |
+| `AIO` | auto | async IO (libaio, used when `IODEPTH` > 1) on nfs/xfs/raw-block. `auto`: checked once per run in a pod, and if the cluster blocks it, `THREADS × IODEPTH` threads with `IODEPTH=1` are used instead. `emulate`: always do that. `native`: no check, no fallback. `AIO_MAX_THREADS` (1024) caps the thread count. See "Async IO blocked" |
 | `DETACH` | 1 | benchmarks run detached in the controller pod and survive a lost connection (VPN/SSH/laptop sleep). Output is polled every `POLL` (5) s, and the runner gives up after `RECONNECT_TIMEOUT` (3600) s offline. Ctrl+C stops the benchmark in the cluster too |
 
 ### NFS ([nfs/profile.env](nfs/profile.env))
@@ -285,6 +286,27 @@ Files and Google Cloud:
   The chart runs two elbencho services per pod for this (ports 1611 and 1612). The summary prints the
   **combined** result and the real read share that was achieved. elbencho's custom tree mode supports only one
   bucket, so the mixes use the bucket `<BUCKET_PREFIX>-mix`.
+
+## Async IO blocked (`io_getevents failed ... Operation not permitted`)
+
+```
+ERROR: Getting async IO events (io_getevents) failed. NumPending: 16; ReturnCode: -1; ... SysErr: Operation not permitted
+```
+
+elbencho uses libaio for `--iodepth` > 1. Some clusters (typically OpenShift with the default seccomp profile) block
+the syscalls that libaio needs. The `prepare` phase still works, because it is plain synchronous IO.
+Check whether a filter is active in a pod: `grep Seccomp /proc/1/status` shows `2` when it is.
+
+- **Nothing to do:** with `AIO=auto` (default) the runner detects this before the measured phase, prints a warning and
+  runs with `THREADS × IODEPTH` threads at `IODEPTH=1`. This gives the same concurrency per pod and is the
+  normal way to load NFS. The summary then shows the real thread count and `iodepth 1`.
+  In `13-iodepth-sweep` the "iodepth" steps become thread counts. Only for a true libaio queue-depth curve you
+  need the permanent fix.
+- **Permanent fix:** run the pods without a seccomp filter. The chart supports it:
+  `HELM_ARGS="--set securityContext.seccompProfile.type=Unconfined"`. On OpenShift the pods' service account needs an
+  SCC that allows it (for example `oc adm policy add-scc-to-user privileged -z default -n elbencho-bench`, or a narrower custom
+  SCC with `seccompProfiles: ["*"]`), which is a cluster admin decision.
+- Check the result: the pod should then show `Seccomp: 0`, and the log line `async IO (libaio) works in the pods`.
 
 ## Caveats
 - **Stale dataset markers.** Datasets are prepared once and marked on the StatefulSet. If the data was deleted outside

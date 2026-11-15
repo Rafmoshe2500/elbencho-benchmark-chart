@@ -63,6 +63,11 @@ command -v helm >/dev/null || die "helm not found"
 : "${DETACH:=1}"               # 1 = benchmarks run detached in the controller pod and survive a lost
                                #     kubectl connection (VPN/SSH drop); output is polled every POLL s
 : "${POLL:=5}"
+: "${AIO:=auto}"              # async IO (libaio, used when IODEPTH > 1) on nfs/xfs/raw-block:
+                               #   auto   = check once in a pod; if the cluster blocks it (seccomp), emulate it
+                               #   emulate= never use libaio: THREADS x IODEPTH threads with IODEPTH=1
+                               #   native = no check, no fallback (fails if libaio is blocked)
+: "${AIO_MAX_THREADS:=1024}"   # cap for the emulated thread count
 : "${RECONNECT_TIMEOUT:=3600}" # give up after this many seconds without a working connection
 
 # shellcheck disable=SC1090
@@ -180,7 +185,7 @@ K="kubectl -n $NAMESPACE"
            FILES FILE_SIZE PVC_SIZE STORAGE_CLASS NFS_SERVER NFS_PATH NFS_STORAGE_CLASS NFS_VERS NCONNECT \
            RSIZE WSIZE NFS_EXTRA_OPTS S3_ENDPOINT S3_REGION BUCKET_PREFIX BUCKETS OBJ_SIZE OBJECTS \
            TPUT_OBJ_SIZE TPUT_OBJECTS MIX_OBJECTS META_DIRS META_FILES EXTRA_ARGS SPREAD CPU MEMORY \
-           DEV_SIZE STORAGE_CACHE CACHE_FACTOR BLOCKVARPCT DETACH RANGE_OBJ_SIZE RANGE_OBJECTS RANGE_BS; do
+           DEV_SIZE STORAGE_CACHE CACHE_FACTOR BLOCKVARPCT DETACH AIO RANGE_OBJ_SIZE RANGE_OBJECTS RANGE_BS; do
     [ -n "${!v:-}" ] && printf '%s=%q\n' "$v" "${!v}"
   done
 } > "$RUN_DIR/params.env"
@@ -409,6 +414,54 @@ cache_check() {
 cache_check
 echo "DATASET_BYTES=$DATASET_BYTES" >> "$RUN_DIR/params.env"
 
+# ------------------------------------------------------- async IO preflight ---
+# elbencho uses Linux libaio for --iodepth > 1. Container runtimes can block its syscalls with a
+# seccomp profile (error "Getting async IO events (io_getevents) failed ... Operation not permitted").
+# Sync IO (--iodepth 1) is not affected, and N threads x iodepth 1 gives the same concurrency.
+aio_emulate() {   # aio_emulate <threads-var> <iodepth-var>: iodepth N -> N x threads at iodepth 1
+  local t=${!1} q=${!2}
+  [ "$q" -gt 1 ] 2>/dev/null || return 0
+  local n=$(( t * q )); [ "$n" -le "$AIO_MAX_THREADS" ] || n=$AIO_MAX_THREADS
+  printf -v "$1" '%s' "$n"; printf -v "$2" '%s' 1
+}
+AIO_EMULATE=0
+aio_preflight() {
+  [ "$FAMILY" != s3 ] || return 0
+  case "$AIO" in native) return 0 ;; emulate) AIO_EMULATE=1 ;; auto) ;; *) die "AIO must be auto | emulate | native" ;; esac
+  if [ "$AIO" = auto ]; then
+    # only when this run uses libaio: IODEPTH > 1 (test 15 has its own KV_IODEPTH)
+    [ "${IODEPTH:-1}" -gt 1 ] 2>/dev/null || [ "$TEST" = 15 ] || return 0
+    local script out rc
+    if [ "$FAMILY" = block ]; then
+      script='elbencho -r --direct --iodepth 2 -s 64k -b 4k --nolive /dev/elbencho 2>&1'
+    else
+      script='f=/data/.aio-check-$$; elbencho -w -s 64k -b 4k --nolive $f >/dev/null 2>&1 && elbencho -r --direct --iodepth 2 -s 64k -b 4k --nolive $f 2>&1; rc=$?; rm -f $f; exit $rc'
+    fi
+    out=$($K exec "$FULL-0" -c elbencho -- sh -c "$script" 2>&1) && rc=0 || rc=$?
+    if [ "$rc" = 0 ]; then
+      log "async IO (libaio) works in the pods"
+      return 0
+    elif printf '%s' "$out" | grep -qi "async io"; then
+      AIO_EMULATE=1
+      warn "async IO (libaio) is blocked in the pods (usually a seccomp profile): $(printf '%s' "$out" | grep -i 'async io' | head -1 | cut -c1-200)"
+    else
+      warn "async IO check was inconclusive (exit $rc): $(printf '%s' "$out" | tail -1 | cut -c1-200) - continuing with native async IO"
+      return 0
+    fi
+  fi
+  if [ "$AIO_EMULATE" = 1 ]; then
+    # test 15 has no THREADS/IODEPTH of its own (it emulates KV_IODEPTH inside the test)
+    if [ -n "${THREADS:-}" ] && [ -n "${IODEPTH:-}" ]; then
+      local t0=$THREADS q0=$IODEPTH
+      aio_emulate THREADS IODEPTH
+      [ "$q0" -gt 1 ] 2>/dev/null && log "emulating async IO: THREADS=$t0 x IODEPTH=$q0 -> THREADS=$THREADS IODEPTH=1 (same concurrency per pod; AIO=native to disable)"
+    fi
+    echo "AIO_EMULATED=1" >> "$RUN_DIR/params.env"
+    warn "permanent fix: run the pods without a seccomp filter (see benchmarks/README.md, 'async IO blocked')"
+  fi
+}
+
 deploy
+aio_preflight
 run_test
 finish
