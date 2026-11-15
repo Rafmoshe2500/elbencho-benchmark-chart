@@ -40,7 +40,7 @@ command -v helm >/dev/null || die "helm not found"
 : "${NAMESPACE:=elbencho-bench}"
 : "${RELEASE_PREFIX:=eb}"
 : "${CHART:=$REPO_DIR/charts/elbencho}"
-: "${IMAGE_REPO:=}"            # default: chart default (breuner/elbencho)
+: "${IMAGE_REPO:=}"            # default: chart default (rafmoshe2500/elbencho, see ../Dockerfile)
 : "${IMAGE_TAG:=}"             # default: chart default (v<appVersion>)
 : "${PODS:=2}"                 # number of elbencho daemons (load generators)
 : "${SPREAD:=preferred}"       # spread daemons over nodes: preferred | required | none

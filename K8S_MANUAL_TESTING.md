@@ -43,11 +43,11 @@ kubectl get pvc local-pvc
 *Expected Output: STATUS should be `Bound`.*
 
 ### Step 5: (Optional) Pre-load the elbencho image into Minikube
-The chart uses the official image `breuner/elbencho:v3.3-3`, which Minikube pulls automatically.
+The chart uses `rafmoshe2500/elbencho:3.3-3` (built from the repository Dockerfile), which Minikube pulls automatically.
 To pre-load it (e.g. for offline use):
 ```powershell
-docker pull breuner/elbencho:v3.3-3
-.\minikube.exe image load breuner/elbencho:v3.3-3
+docker pull rafmoshe2500/elbencho:3.3-3
+.\minikube.exe image load rafmoshe2500/elbencho:3.3-3
 ```
 
 ### Step 6: Deploy the Helm Chart in Job Mode

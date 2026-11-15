@@ -8,18 +8,33 @@ Elbencho is a modern distributed storage benchmark tool for file systems, object
 
 ## 1. Container Image
 
-The chart uses the **official elbencho image** published by the elbencho author:
-[`breuner/elbencho`](https://hub.docker.com/r/breuner/elbencho) (amd64 + arm64, Ubuntu based, includes S3 and libaio).
-The default tag is `v<appVersion>` from `Chart.yaml`, currently **`v3.3-3`**. No custom build is needed.
-
-To pin a different version or use a mirror:
+The chart uses `rafmoshe2500/elbencho:3.3-3`, built from the [`Dockerfile`](Dockerfile) in this repository: the official
+**static** elbencho release binary (v3.3-3) on Ubuntu 22.04, with bash and CA certificates.
 
 ```bash
-helm install bench ./charts/elbencho --set image.repository=my-registry/elbencho --set image.tag=v3.3-3
+docker build -t rafmoshe2500/elbencho:3.3-3 .
+docker push rafmoshe2500/elbencho:3.3-3
+# other version or ARM: --build-arg ELBENCHO_VERSION=3.3-3 --build-arg ELBENCHO_ARCH=aarch64
 ```
 
+**Why not the official `breuner/elbencho` image.** It is Ubuntu 24.04/26.04 based and uses the system libaio 0.3.113,
+which implements `io_getevents()` with the `io_pgetevents` syscall and falls back to the old syscall only on `ENOSYS`.
+The default seccomp profile of CRI-O, which is OpenShift's `RuntimeDefault`, denies `io_pgetevents` with `EPERM`. So every run with
+`--iodepth` > 1 fails there:
+
+```
+ERROR: Getting async IO events (io_getevents) failed. NumPending: 16; ReturnCode: -1; ... SysErr: Operation not permitted
+```
+
+The static binary carries its own libaio, which uses `io_getevents`, and that syscall is allowed. Tested under the real CRI-O
+default profile (from containers/common): the official image fails as above, while this image runs `--iodepth` 16 and 64,
+block-size mixes (`-b 32k:1,64k:1,128k:1`) and S3.
+
+The official image still works on clusters without that profile:
+`--set image.repository=breuner/elbencho --set image.tag=v3.3-3`, or `IMAGE_REPO`/`IMAGE_TAG` in `benchmarks/`.
+
 > [!NOTE]
-> Version 3.2.1 or later is required for weighted block-size mixes (`-b 32k:1,64k:1,128k:1`), which
+> elbencho 3.2.1 or later is required for weighted block-size mixes (`-b 32k:1,64k:1,128k:1`), which
 > the load-test suite in [`benchmarks/`](benchmarks) uses.
 
 ---

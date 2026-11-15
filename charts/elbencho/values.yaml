@@ -5,12 +5,14 @@
 replicaCount: 1
 
 image:
-  # -- Docker repository. Default: the official image by the elbencho author (amd64 + arm64).
-  repository: breuner/elbencho
+  # -- Docker repository. Default: image built from ../../Dockerfile (official STATIC elbencho binary on
+  # Ubuntu 22.04). The official breuner/elbencho image fails with --iodepth > 1 under the CRI-O/OpenShift
+  # default seccomp profile (its libaio uses io_pgetevents, which that profile denies).
+  repository: rafmoshe2500/elbencho
   # -- Image pull policy
   pullPolicy: IfNotPresent
-  # -- Overrides the image tag (defaults to "v" + chart appVersion, e.g. v3.3-3)
-  tag: ""
+  # -- Image tag. Empty = "v" + chart appVersion (the tag format of breuner/elbencho, e.g. v3.3-3)
+  tag: "3.3-3"
 
 imagePullSecrets: []
 nameOverride: ""

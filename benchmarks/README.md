@@ -1,7 +1,7 @@
 # elbencho Load-Test Suite (NFS · XFS · Raw Block · S3)
 
 Ready-made storage load tests on Kubernetes, built on the Helm chart in [`../charts/elbencho`](../charts/elbencho)
-and the official image `breuner/elbencho:v3.3-3`.
+and the image `rafmoshe2500/elbencho:3.3-3` (built from ../Dockerfile, see the main README).
 
 Each test deploys N elbencho daemons (a StatefulSet) plus a small controller pod, prepares a dataset when needed,
 runs the measured phase from the controller with `elbencho --hosts ...`, and saves the results on your machine.
@@ -293,8 +293,13 @@ Files and Google Cloud:
 ERROR: Getting async IO events (io_getevents) failed. NumPending: 16; ReturnCode: -1; ... SysErr: Operation not permitted
 ```
 
-elbencho uses libaio for `--iodepth` > 1. Some clusters (typically OpenShift with the default seccomp profile) block
-the syscalls that libaio needs. The `prepare` phase still works, because it is plain synchronous IO.
+elbencho uses libaio for `--iodepth` > 1. The libaio in the official `breuner/elbencho` image (Ubuntu 24.04+) needs the
+`io_pgetevents` syscall, which the CRI-O/OpenShift default seccomp profile denies. The `prepare` phase still works,
+because it is plain synchronous IO.
+
+- **Fix:** use the chart's default image `rafmoshe2500/elbencho:3.3-3` (static binary, see the main README and the
+  `Dockerfile`), which works under that profile with any iodepth. If you set `IMAGE_REPO=breuner/elbencho`, you get
+  this error again.
 Check whether a filter is active in a pod: `grep Seccomp /proc/1/status` shows `2` when it is.
 
 - **Nothing to do:** with `AIO=auto` (default) the runner detects this before the measured phase, prints a warning and
