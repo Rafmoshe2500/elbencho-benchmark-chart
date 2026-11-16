@@ -40,7 +40,11 @@ spec:
             tcpSocket:
               port: {{ $port }}
             periodSeconds: 5
-          {{- include "elbencho.containerCommon" $ | trim | nindent 10 }}
+          {{- $cctx := $ }}
+          {{- if and $i (kindIs "map" $.Values.serviceMode.extraInstanceResources) }}
+          {{- $cctx = dict "Values" $.Values "Chart" $.Chart "Release" $.Release "Capabilities" $.Capabilities "Template" $.Template "instanceResources" $.Values.serviceMode.extraInstanceResources }}
+          {{- end }}
+          {{- include "elbencho.containerCommon" $cctx | trim | nindent 10 }}
         {{- end }}
   {{- if include "elbencho.perPodClaims" . }}
   volumeClaimTemplates:

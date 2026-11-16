@@ -23,6 +23,14 @@ check "service: 2 instances/pod + controller" --set mode=service --set protocol=
 check "service: one shared PVC (perPod=false)" --set mode=service --set persistence.perPod=false
 check "service: block, shared device" --set mode=service --set protocol=block --set persistence.perPod=false
 check "nfs: sub dir per pod" --set mode=service --set protocol=nfs --set nfs.server=10.0.0.5 --set persistence.subPathPerPod=true
+check "service: idle 2nd instance without resources + even spread" --set mode=service --set protocol=s3 --set s3.endpoints=http://s3:9000 \
+      --set s3.existingSecret=x --set serviceMode.instancesPerPod=2 --set resources.requests.cpu=8 \
+      --set-json 'serviceMode.extraInstanceResources={}' --set-json 'tolerations=[{"operator":"Exists"}]' \
+      --set-json 'topologySpreadConstraints=[{"maxSkew":1,"topologyKey":"kubernetes.io/hostname","whenUnsatisfiable":"DoNotSchedule"}]'
+n=$(helm template t "$CHART" --set mode=service --set protocol=s3 --set s3.endpoints=http://s3:9000 --set s3.existingSecret=x \
+      --set serviceMode.instancesPerPod=2 --set resources.requests.cpu=8 --set-json 'serviceMode.extraInstanceResources={}' | grep -c 'cpu: 8')
+[ "$n" = 1 ] || { echo "FAIL: the idle 2nd instance must not get the resources (got $n)"; exit 1; }
+echo "ok  resources only on the first instance"
 for s in benchmarks/lib/*.sh benchmarks/*.sh benchmarks/*/*.sh benchmarks/*/profile.env; do bash -n "$s"; done
 echo "ok  benchmark scripts: bash syntax"
 # negative tests

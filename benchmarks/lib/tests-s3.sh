@@ -44,21 +44,34 @@ mkbuckets() {   # always (idempotent, cheap): buckets may have been deleted outs
   eb mkbuckets 0 ELBENCHO_HOSTS -d -t 1 "$BUCKETS_PATH"
 }
 
+# Object names depend only on the global thread number ("rank" 0 .. PODS x THREADS - 1), not on how the
+# ranks are split into pods and threads (verified with elbencho 3.3-3, several buckets). So a run with fewer
+# pods/threads reads a subset of a larger dataset, and a new prepare is needed only when a run needs MORE
+# ranks than exist. Sweeps over THREADS / PODS therefore do not rewrite the dataset at every step.
+need_prepare_ranks() {   # need_prepare_ranks <kind> <signature without ranks>
+  case "$PREPARE" in always) return 0 ;; never) return 1 ;; esac
+  local cur; cur=$(ds_get "$1")
+  [ "${cur%,ranks=*}" = "$2" ] && [ "${cur##*,ranks=}" -ge $((PODS * THREADS)) ] 2>/dev/null && return 1
+  return 0
+}
+
 prepare_iops() {
-  local sig="$BUCKETS_PATH,obj=$OBJ_SIZE,n=$OBJECTS,t=$THREADS,pods=$PODS"
-  if need_prepare "iops-$LAYOUT" "$sig"; then
-    log "preparing $((OBJECTS*THREADS*PODS)) objects of $OBJ_SIZE"
-    eb prepare 0 ELBENCHO_HOSTS -w -t "$THREADS" "${IOPS_DS[@]}" "$BUCKETS_PATH"
-    ds_set "iops-$LAYOUT" "$sig"
+  local sig="$BUCKETS_PATH,obj=$OBJ_SIZE,n=$OBJECTS"
+  if need_prepare_ranks "iops-$LAYOUT" "$sig"; then
+    # a THREADS ladder (test 17) names its highest step, so that the small objects are written only once
+    local pt=$THREADS; [ "${PREP_MIN_THREADS:-0}" -gt "$pt" ] 2>/dev/null && pt=$PREP_MIN_THREADS
+    log "preparing $((OBJECTS*pt*PODS)) objects of $OBJ_SIZE"
+    eb prepare 0 ELBENCHO_HOSTS -w -t "$pt" "${IOPS_DS[@]}" "$BUCKETS_PATH"
+    ds_set "iops-$LAYOUT" "$sig,ranks=$((PODS * pt))"
   fi
 }
 
 prepare_tput() {
-  local sig="$BUCKETS_PATH,obj=$TPUT_OBJ_SIZE,n=$TPUT_OBJECTS,b=$BS,t=$THREADS,pods=$PODS"
-  if need_prepare tput "$sig"; then
+  local sig="$BUCKETS_PATH,obj=$TPUT_OBJ_SIZE,n=$TPUT_OBJECTS,b=$BS"
+  if need_prepare_ranks tput "$sig"; then
     log "preparing $((TPUT_OBJECTS*THREADS*PODS)) objects of $TPUT_OBJ_SIZE"
     eb prepare 0 ELBENCHO_HOSTS -w -t "$THREADS" -n 1 -N "$TPUT_OBJECTS" -s "$TPUT_OBJ_SIZE" -b "$BS" --s3objprefix tput/ "$BUCKETS_PATH"
-    ds_set tput "$sig"
+    ds_set tput "$sig,ranks=$((PODS * THREADS))"
   fi
 }
 
@@ -90,9 +103,13 @@ mix_test() {
   rd=$(eb_cmd mix-read 1 ELBENCHO_HOSTS -r --s3fastget -t "$rt" --treefile "$tree" -b "$maxb" --s3objprefix "$prefix/r/" "${TIMED[@]}" --start '$S' "$BUCKETS_PATH")
   wr=$(eb_cmd mix-write 1 ELBENCHO_HOSTS_2 -w -t "$wt" --treefile "$tree" -b "$maxb" --s3objprefix "$prefix/w/" "${TIMED[@]}" --start '$S' "$BUCKETS_PATH")
   rd=${rd//\\\$S/\$S}; wr=${wr//\\\$S/\$S}   # let the remote shell expand the common start time
+  local rc=0
+  cpu_begin elbencho elbencho-2
   ctl_run "S=\$((\$(date +%s)+5)); ($rd) > $REMOTE_DIR/mix-read.log 2>&1 & ($wr) > $REMOTE_DIR/mix-write.log 2>&1 &
        st=0; for j in \$(jobs -p); do wait \$j || st=1; done; cat $REMOTE_DIR/mix-read.log $REMOTE_DIR/mix-write.log; exit \$st" \
-    2>&1 | tee -a "$RUN_DIR/console.log"
+    2>&1 | tee -a "$RUN_DIR/console.log" || rc=$?
+  cpu_end mix-read mix-write
+  return $rc
 }
 
 post_summary() {
@@ -117,11 +134,11 @@ run_test() {
            eb lat-get 1 ELBENCHO_HOSTS -r --s3fastget "${l[@]}" "${TIMED[@]}" "$BUCKETS_PATH" ;;
     16)    # random byte-range GETs inside large objects (analytics engines reading Parquet/ORC)
            local r=(-n 1 -N "$RANGE_OBJECTS" -s "$RANGE_OBJ_SIZE" --s3objprefix range/)
-           local sig="$BUCKETS_PATH,obj=$RANGE_OBJ_SIZE,n=$RANGE_OBJECTS,t=$THREADS,pods=$PODS"
-           if need_prepare range "$sig"; then
+           local sig="$BUCKETS_PATH,obj=$RANGE_OBJ_SIZE,n=$RANGE_OBJECTS"
+           if need_prepare_ranks range "$sig"; then
              log "preparing $((RANGE_OBJECTS*THREADS*PODS)) objects of $RANGE_OBJ_SIZE"
              eb prepare 0 ELBENCHO_HOSTS -w -t "$THREADS" "${r[@]}" -b 16m "$BUCKETS_PATH"
-             ds_set range "$sig"
+             ds_set range "$sig,ranks=$((PODS * THREADS))"
            fi
            log "random ranged GETs ($RANGE_BS) at random offsets of random objects"
            eb "$TNAME" 1 ELBENCHO_HOSTS -r --s3randobj --s3fastget -t "$THREADS" --iodepth "$IODEPTH" "${r[@]}" -b "$RANGE_BS" \

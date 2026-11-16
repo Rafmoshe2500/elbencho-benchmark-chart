@@ -2,7 +2,7 @@
 # elbencho benchmark runner.
 #   usage: run.sh <protocol> <test-id> [KEY=VALUE ...]
 #   protocol: nfs | xfs | raw-block | s3
-#   test-id:  01..16 (see benchmarks/README.md)
+#   test-id:  01..17 (see benchmarks/README.md)
 # All tunables can be given as KEY=VALUE arguments or as environment variables.
 set -euo pipefail
 
@@ -24,6 +24,43 @@ hr() { awk -v b="$1" 'BEGIN{ split("B KiB MiB GiB TiB PiB",u," "); i=1; while (b
 # average size of a weighted mix "32k:1,64k:2" (or a single size) in bytes
 mix_avg() { local tot=0 w=0 e s n; for e in ${1//,/ }; do s=$(to_bytes "${e%%:*}"); n=${e#*:}; [ "$n" = "$e" ] && n=1; tot=$((tot + s*n)); w=$((w + n)); done; echo $((tot / w)); }
 
+# CPU quantity ("8", "1.5", "500m") -> millicores
+to_milli() { awk -v v="$1" 'BEGIN{ if (v ~ /m$/) printf "%d\n", v+0; else printf "%d\n", v*1000 }'; }
+
+# Result groups of one run from summary.csv, one line per group:
+#   group  ops/s  MiB/s  avg_ms  p99_ms  client_cpu_pct  pods threads iodepth block nconnect dataset_gib
+# A group is a measured phase; the two halves of an S3 mix (mix-read + mix-write) are one group "mix".
+run_rows() {
+  [ -f "$RESULTS_DIR/summary.csv" ] || return 0
+  awk -F, -v dir="$1" '
+    NR==1 { for (i=1;i<=NF;i++) h[$i]=i; next }
+    $(h["run_dir"])==dir && $(h["phase"]) !~ /^(prepare|mkbucket)/ {
+      g=$(h["phase"]); mix=(g ~ /^mix-(read|write)$/); if (mix) g="mix"
+      if (!(g in ops)) { order[++n]=g; thr[g]=0 }
+      ops[g]+=$(h["total_iops"]); mib[g]+=$(h["mib_s"])+$(h["read_mib_s"])
+      a=$(h["lat_avg_us"])+0; b=$(h["read_lat_avg_us"])+0; if (b>a) a=b; if (a>avg[g]) avg[g]=a
+      a=$(h["p99_us"])+0; b=$(h["read_p99_us"])+0; if (b>a) a=b; if (a>p99[g]) p99[g]=a
+      c=$(h["client_cpu_pct"]); if (c!="" && c+0>=cpu[g]+0) cpu[g]=c
+      thr[g]=(mix ? thr[g]+$(h["threads"]) : $(h["threads"])); qd[g]=$(h["iodepth"]); bs[g]=$(h["block"])
+      pods[g]=$(h["pods"]); nc[g]=$(h["nconnect"]); ds[g]=$(h["dataset_gib"])
+    }
+    END { for (i=1;i<=n;i++) { g=order[i]
+      printf "%s\t%.0f\t%.0f\t%.2f\t%.2f\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", g, ops[g], mib[g], avg[g]/1000, p99[g]/1000, (cpu[g]==""?"-":cpu[g]), pods[g], thr[g], qd[g], bs[g], (nc[g]==""?"-":nc[g]), (ds[g]==""?"-":ds[g]"G") } }' "$RESULTS_DIR/summary.csv"
+}
+# verdict <avg_ms> <p99_ms> <client_cpu_pct>: client = the load generators were the limit, slo = latency target missed
+verdict() {
+  awk -v a="$1" -v p="$2" -v c="$3" -v am="${LAT_AVG_MAX:-}" -v pm="${LAT_P99_MAX:-}" -v cm="${CLIENT_CPU_MAX:-80}" 'BEGIN{
+    if (c!="-" && c!="" && c+0>=cm+0) print "client"
+    else if ((am!="" && a+0>am+0) || (pm!="" && p+0>pm+0)) print "slo"
+    else print "ok" }'
+}
+slo_text() {
+  local t=""
+  [ -n "${LAT_AVG_MAX:-}" ] && t="avg <= ${LAT_AVG_MAX} ms"
+  [ -n "${LAT_P99_MAX:-}" ] && t="${t:+$t, }p99 <= ${LAT_P99_MAX} ms"
+  echo "${t:-no latency target set (LAT_AVG_MAX / LAT_P99_MAX, in ms)}"
+}
+
 [ $# -ge 2 ] || die "usage: run.sh <nfs|xfs|raw-block|s3> <test-id> [KEY=VALUE ...]"
 PROTO=$1; TEST=$2; shift 2
 for kv in "$@"; do
@@ -42,11 +79,22 @@ command -v helm >/dev/null || die "helm not found"
 : "${CHART:=$REPO_DIR/charts/elbencho}"
 : "${IMAGE_REPO:=}"            # default: chart default (rafmoshe2500/elbencho, see ../Dockerfile)
 : "${IMAGE_TAG:=}"             # default: chart default (v<appVersion>)
-: "${PODS:=2}"                 # number of elbencho daemons (load generators)
-: "${SPREAD:=preferred}"       # spread daemons over nodes: preferred | required | none
+[ "$TEST" = 17 ] && : "${PODS:=auto}"   # find-max: load generators on every node unless told otherwise
+: "${PODS:=2}"                 # number of elbencho daemons (load generators); auto = PODS_PER_NODE on every node
+: "${PODS_PER_NODE:=1}"        # PODS=auto: daemons per node
+: "${TOLERATE_ALL:=}"          # 1 = tolerate every node taint (control plane...). Default: 1 with PODS=auto, else 0
+: "${SPREAD:=preferred}"       # spread daemons over nodes: preferred | required | even | none
 : "${NODE_SELECTOR:=}"         # e.g. "node-role/bench=true" (key=value)
-: "${CPU:=}"                   # cpu request+limit per daemon, e.g. "8"
+: "${CPU:=}"                   # cpu request per daemon pod, e.g. "8"; auto = CPU_SHARE % of the free CPU of the
+                               # weakest node, divided between its daemons; none = no request (default with PODS=auto: auto)
+: "${CPU_SHARE:=80}"           # CPU=auto: percent of a node's free CPU given to its daemons
+: "${CPU_LIMIT:=0}"            # 1 = cpu limit = request (Guaranteed QoS / static CPU manager). 0 = request only:
+                               #     no CFS throttling, which would show up as storage latency
 : "${MEMORY:=}"                # memory request+limit per daemon, e.g. "16Gi"
+: "${CLIENT_CPU:=1}"           # 1 = measure the CPU the daemons used in every measured phase (cgroup counters)
+: "${CLIENT_CPU_MAX:=80}"      # busiest daemon above this % of its CPU -> the result is client-limited
+# LAT_AVG_MAX / LAT_P99_MAX: latency targets in ms (average / p99) for the verdict of a run and for the
+#   search of test 17. No default, except S3: 30 / 90 (s3/profile.env). LAT_AVG_MAX= switches a target off.
 : "${PREPARE:=auto}"           # dataset creation before read/mixed tests: auto | always | never
 : "${KEEP:=1}"                 # 1 = keep the deployment for the next test (see cleanup.sh)
 : "${LIVE:=1}"                 # 1 = live progress lines during the run
@@ -72,6 +120,7 @@ command -v helm >/dev/null || die "helm not found"
 
 # shellcheck disable=SC1090
 source "$BENCH_DIR/$PROTO/profile.env"
+: "${LAT_AVG_MAX:=}"; : "${LAT_P99_MAX:=}"
 
 case "$PROTO" in
   nfs|xfs) FAMILY=file ;;
@@ -91,6 +140,7 @@ case "$TEST" in
   12) TNAME=scaling-sweep ;;       13) TNAME=iodepth-sweep ;;
   14) TNAME=ai-training ;;         15) TNAME=ai-inference ;;
   16) TNAME=range-read ;;
+  17) TNAME=find-max ;;
   *) die "unknown test id '$TEST'" ;;
 esac
 case "$TEST" in
@@ -117,7 +167,9 @@ esac
 # "block" of the IOPS tests is the object size; throughput tests use 16 MiB multipart parts.
 if [ "$FAMILY" = s3 ]; then
   case "$TEST" in
-    01|02|08|09) THREADS=${USER_THREADS:-32}; IODEPTH=${USER_IODEPTH:-1}; BS=${USER_BS:-$OBJ_SIZE} ;;
+    01|02|08|09) THREADS=${USER_THREADS:-32}; IODEPTH=1; BS=${USER_BS:-$OBJ_SIZE}
+                 # verified with elbencho 3.3-3: one PUT/GET per object is always synchronous, --iodepth changes nothing
+                 [ "${USER_IODEPTH:-1}" = 1 ] || warn "IODEPTH has no effect on S3 whole-object requests (concurrency = PODS x THREADS) - using IODEPTH=1; raise THREADS instead" ;;
     03|04)       THREADS=${USER_THREADS:-16}; IODEPTH=${USER_IODEPTH:-1}; BS=${USER_BS:-16m} ;;
     05|06|07)    THREADS=${USER_THREADS:-20} ;;
     16)          THREADS=${USER_THREADS:-16}; IODEPTH=${USER_IODEPTH:-1} ;;
@@ -125,43 +177,101 @@ if [ "$FAMILY" = s3 ]; then
 fi
 : "${DURATION:=60}"            # seconds per timed phase
 
-# ------------------------------------------------------- sweeps (12, 13) ---
-# 12: pods (and NCONNECT / IODEPTH) sweep, 13: iodepth sweep at a fixed pod count.
-if [ "$TEST" = 12 ] || [ "$TEST" = 13 ]; then
-  if [ "$TEST" = 13 ]; then
-    : "${SWEEP_TEST:=02}"; : "${SWEEP_PODS:=$PODS}"; : "${SWEEP_IODEPTH:=1 2 4 8 16 32 64 128}"
-  else
-    : "${SWEEP_TEST:=02}"; : "${SWEEP_PODS:=1 2 4 8}"; : "${SWEEP_IODEPTH:=}"
-  fi
+# --------------------------------------------------- sweeps (12, 13, 17) ---
+# 12: pods (and NCONNECT / THREADS / IODEPTH / dataset size) sweep, 13: iodepth sweep at a fixed pod count,
+# 17: find-max = load ladder (S3: THREADS, files/block: IODEPTH) that stops at the latency target,
+#     when the result stops growing, or when the load generators themselves are the limit.
+if [ "$TEST" = 12 ] || [ "$TEST" = 13 ] || [ "$TEST" = 17 ]; then
+  : "${SWEEP_TEST:=02}"; : "${SWEEP_THREADS:=}"
+  case "$TEST" in
+    13) : "${SWEEP_PODS:=$PODS}"; : "${SWEEP_IODEPTH:=1 2 4 8 16 32 64 128}" ;;
+    12) : "${SWEEP_PODS:=1 2 4 8}"; : "${SWEEP_IODEPTH:=}" ;;
+    17) : "${SWEEP_PODS:=$PODS}"; : "${FIND_STOP:=1}"
+        if [ -z "$SWEEP_THREADS${SWEEP_IODEPTH:-}" ]; then
+          if [ "$FAMILY" = s3 ]; then
+            case "$SWEEP_TEST" in 03|04|16) SWEEP_THREADS="2 4 8 16 32 64" ;; *) SWEEP_THREADS="8 16 32 64 128 256" ;; esac
+          else
+            case "$SWEEP_TEST" in 03|04|07) SWEEP_IODEPTH="1 2 4 8 16 32" ;; *) SWEEP_IODEPTH="1 2 4 8 16 32 64 128" ;; esac
+          fi
+        fi
+        : "${SWEEP_IODEPTH:=}" ;;
+  esac
+  : "${FIND_STOP:=0}"            # 1 = stop a ladder at the first step that misses the target / is client-limited / is flat
+  : "${MIN_GAIN:=3}"             # a step that gains less than this % over the best so far counts as flat
   : "${SWEEP_NCONNECT:=}"        # nfs only, e.g. "1 4 8 16"
+  case "$SWEEP_TEST" in 03|04) : "${SWEEP_METRIC:=mibs}" ;; *) : "${SWEEP_METRIC:=ops}" ;; esac
   # dataset size (find where the storage cache ends): FILE_SIZE (nfs/xfs), DEV_SIZE (raw-block), OBJECTS (s3)
   SWEEP_SIZE_VAR=""; SWEEP_SIZES=""
   for v in FILE_SIZE DEV_SIZE OBJECTS; do
     sv="SWEEP_$v"; if [ -n "${!sv:-}" ]; then SWEEP_SIZE_VAR=$v; SWEEP_SIZES=${!sv}; fi
   done
-  case "$SWEEP_TEST" in 12|13|14|15) die "SWEEP_TEST must be one of 01..11" ;; esac
+  case "$SWEEP_TEST" in 12|13|14|15|17) die "SWEEP_TEST must be one of 01..11, 16" ;; esac
   [ -z "$SWEEP_IODEPTH" ] || [ "$SWEEP_TEST" != 10 ] || die "test 10 is fixed at QD1 - sweep another test"
   SWEEP_ID=sweep-$(date +%Y%m%d-%H%M%S)
+  if [ "$FAMILY" = s3 ] && [ -n "$SWEEP_THREADS" ] && [[ $SWEEP_TEST == 02 || $SWEEP_TEST == 08 ]]; then
+    PREP_MIN_THREADS=$(printf '%s\n' $SWEEP_THREADS | sort -n | tail -1); export PREP_MIN_THREADS
+  fi
+  mkdir -p "$RESULTS_DIR"
+  STEPS="$RESULTS_DIR/$SWEEP_ID.tsv"; : > "$STEPS"
+  last_dir() { [ -f "$RESULTS_DIR/summary.csv" ] && awk -F, -v id="$SWEEP_ID" 'NR==1{for(i=1;i<=NF;i++)h[$i]=i;next} $(h["sweep_id"])==id{d=$(h["run_dir"])} END{print d}' "$RESULTS_DIR/summary.csv"; }
+  prev_dir=""; why=""
   for p in $SWEEP_PODS; do
     for n in ${SWEEP_NCONNECT:-_}; do
-      for q in ${SWEEP_IODEPTH:-_}; do
-        for z in ${SWEEP_SIZES:-_}; do
-          extra=(PODS="$p" SWEEP_ID="$SWEEP_ID")
-          [ "$n" != _ ] && extra+=(NCONNECT="$n")
-          [ "$q" != _ ] && extra+=(IODEPTH="$q")
-          [ "$z" != _ ] && extra+=("$SWEEP_SIZE_VAR=$z" CACHE_CHECK=warn)
-          log "sweep: test $SWEEP_TEST with ${extra[*]}"
-          "$0" "$PROTO" "$SWEEP_TEST" "${extra[@]}" || warn "sweep step failed: ${extra[*]}"
+      for z in ${SWEEP_SIZES:-_}; do
+        best=0; flat=0
+        for t in ${SWEEP_THREADS:-_}; do
+          for q in ${SWEEP_IODEPTH:-_}; do
+            extra=(PODS="$p" SWEEP_ID="$SWEEP_ID")
+            [ "$n" != _ ] && extra+=(NCONNECT="$n")
+            [ "$t" != _ ] && extra+=(THREADS="$t")
+            [ "$q" != _ ] && extra+=(IODEPTH="$q")
+            [ "$z" != _ ] && extra+=("$SWEEP_SIZE_VAR=$z" CACHE_CHECK=warn)
+            log "sweep: test $SWEEP_TEST with ${extra[*]}"
+            rc=0; "$0" "$PROTO" "$SWEEP_TEST" "${extra[@]}" || rc=$?
+            dir=$(last_dir || true)
+            if [ $rc != 0 ] || [ -z "$dir" ] || [ "$dir" = "$prev_dir" ]; then
+              warn "sweep step failed: ${extra[*]}"
+              printf 'failed\t-\t-\t-\t-\t-\t%s\t%s\t%s\t-\t%s\t-\tfailed\t0\n' "$p" "${t/_/-}" "${q/_/-}" "${n/_/-}" >> "$STEPS"
+              [ "$FIND_STOP" = 1 ] && { why="a step failed"; break 2; }
+              continue
+            fi
+            prev_dir=$dir
+            rows=$(run_rows "$dir")
+            IFS=$'\t' read -r _g ops mibs avg p99 cpu _rest <<< "$rows"     # first group decides
+            v=$(verdict "$avg" "$p99" "$cpu")
+            m=$ops; [ "$SWEEP_METRIC" = mibs ] && m=$mibs
+            if [ "$v" = ok ]; then
+              if awk -v m="$m" -v b="$best" -v g="$MIN_GAIN" 'BEGIN{ exit !(m > b*(1+g/100)) }'; then flat=0; else flat=$((flat+1)); v=flat; fi
+              awk -v m="$m" -v b="$best" 'BEGIN{ exit !(m > b) }' && best=$m
+            fi
+            first=1
+            while IFS= read -r row; do [ -n "$row" ] && printf '%s\t%s\t%s\n' "$row" "$v" "$first" >> "$STEPS"; first=0; done <<< "$rows"
+            if [ "$FIND_STOP" = 1 ]; then
+              case "$v" in
+                slo)    why="the latency target was missed ($(slo_text))"; break 2 ;;
+                client) why="the load generators were the limit (a daemon used >= ${CLIENT_CPU_MAX}% of its CPU): add PODS / CPU, not threads"; break 2 ;;
+                flat)   [ "$flat" -ge 2 ] && { why="no gain of more than ${MIN_GAIN}% in the last 2 steps (saturated)"; break 2; } ;;
+              esac
+            fi
+          done
         done
       done
     done
   done
-  log "sweep results ($SWEEP_ID):"
-  awk -F, -v id="$SWEEP_ID" '
-    NR==1 { for (i=1;i<=NF;i++) h[$i]=i
-            printf "%-5s %-8s %-7s %-7s %-7s %-10s %-11s %12s %10s %10s %10s %10s\n","pods","nconnect","threads","iodepth","block","dataset","operation","total_iops","MiB/s","rdMiB/s","lat_avg_us","p99_us"; next }
-    $(h["sweep_id"])==id && $(h["phase"]) !~ /^(prepare|mkbucket)/ {
-      ds=$(h["dataset_gib"]); printf "%-5s %-8s %-7s %-7s %-7s %-10s %-11s %12s %10s %10s %10s %10s\n", $(h["pods"]), $(h["nconnect"]), $(h["threads"]), $(h["iodepth"]), $(h["block"]), (ds==""?"-":ds"G"), $(h["operation"]), $(h["total_iops"]), $(h["mib_s"]), $(h["read_mib_s"]), $(h["lat_avg_us"]), $(h["p99_us"]) }' "$RESULTS_DIR/summary.csv"
+  unit="ops/s"; [ "$SWEEP_METRIC" = mibs ] && unit="MiB/s"
+  log "sweep results ($SWEEP_ID), test $SWEEP_TEST. Target: $(slo_text)"
+  {
+    awk -F'\t' 'BEGIN { printf "%-5s %-8s %-7s %-7s %-7s %-9s %-14s %12s %10s %9s %9s %8s  %s\n","pods","nconnect","threads","iodepth","block","dataset","phase","ops/s","MiB/s","avg_ms","p99_ms","cpu%","verdict" }
+      { v=$13; if (v=="slo") v="over target"; else if (v=="client") v="CLIENT-LIMITED"; else if (v=="flat") v="ok (no gain)"
+        printf "%-5s %-8s %-7s %-7s %-7s %-9s %-14s %12s %10s %9s %9s %8s  %s\n", $7,$11,$8,$9,$10,$12,$1,$2,$3,$4,$5,$6,v }' "$STEPS"
+    [ -n "$why" ] && echo "stopped: $why"
+    awk -F'\t' -v col="$([ "$SWEEP_METRIC" = mibs ] && echo 3 || echo 2)" -v slo="$([ -n "$LAT_AVG_MAX$LAT_P99_MAX" ] && echo " within target ($(slo_text))")" '
+      $14==1 && ($13=="ok" || $13=="flat") && $col+0 > best { best=$col+0; l=$0 }
+      END { if (l=="") { print "BEST: no step met the target and was not client-limited"; exit }
+            split(l, f, "\t")
+            printf "BEST%s: %s ops/s, %s MiB/s at avg %s ms, p99 %s ms  ->  PODS=%s THREADS=%s IODEPTH=%s%s (daemon cpu %s%%)\n", slo, f[2], f[3], f[4], f[5], f[7], f[8], f[9], (f[11]=="-"?"":" NCONNECT="f[11]), f[6] }' "$STEPS"
+  } | tee "$RESULTS_DIR/$SWEEP_ID.txt"
+  log "saved to: $RESULTS_DIR/$SWEEP_ID.txt"
   exit 0
 fi
 
@@ -177,6 +287,68 @@ REMOTE_DIR="/tmp/eb/$RUN_ID"
 mkdir -p "$RUN_DIR"
 : > "$RUN_DIR/console.log"
 K="kubectl -n $NAMESPACE"
+INSTANCES=1; { [ "$FAMILY" = s3 ] || [ "$PROTO" = nfs ]; } && INSTANCES=2
+# tests that load both service instances of a pod at the same time (S3 mixes, async checkpoints)
+BOTH_ACTIVE=0
+[ "$FAMILY" = s3 ] && [[ $TEST == 05 || $TEST == 06 || $TEST == 07 ]] && BOTH_ACTIVE=1
+[ "$TEST" = 14 ] && [ "${CKPT_MODE:-sync}" = async ] && BOTH_ACTIVE=1
+
+# ------------------------------------------- PODS=auto / CPU=auto (per node) ---
+# PODS=auto: PODS_PER_NODE daemons on every Ready, schedulable node (NODE_SELECTOR narrows the set).
+# CPU=auto : CPU_SHARE % of the free CPU (allocatable - requests of the other pods) of the weakest of
+#            these nodes, divided between the daemons of a node, in whole cores.
+ONE_NODE=0   # all daemons share one RWO volume -> one node
+[ "$FAMILY" != s3 ] && [ "$LAYOUT" = single ] && [ "${ACCESS_MODE:-ReadWriteOnce}" = ReadWriteOnce ] && [ "$PROTO" != nfs ] && ONE_NODE=1
+resolve_auto() {
+  [ -n "$TOLERATE_ALL" ] || { [ "$PODS" = auto ] && TOLERATE_ALL=1 || TOLERATE_ALL=0; }
+  [ "$PODS" = auto ] && [ -z "$CPU" ] && CPU=auto
+  [ "$CPU" = none ] && CPU=""
+  if [ "$PODS" != auto ] && [ "$CPU" != auto ]; then
+    [ "$PODS" -ge 1 ] 2>/dev/null || die "PODS must be a number or 'auto', got '$PODS'"
+    return 0
+  fi
+  local sel=() nodes count
+  [ -n "$NODE_SELECTOR" ] && sel=(-l "$NODE_SELECTOR")
+  # name, unschedulable, taint effects, allocatable cpu, Ready
+  nodes=$(kubectl get nodes ${sel[@]+"${sel[@]}"} --no-headers -o 'custom-columns=N:.metadata.name,U:.spec.unschedulable,T:.spec.taints[*].effect,C:.status.allocatable.cpu,R:.status.conditions[?(@.type=="Ready")].status') \
+    || die "PODS=auto / CPU=auto need permission to list nodes (kubectl get nodes) - set PODS and CPU by hand"
+  nodes=$(printf '%s\n' "$nodes" | awk -v tol="$TOLERATE_ALL" '$2!="true" && $5=="True" && (tol==1 || $3 !~ /NoSchedule|NoExecute/) { print $1, $4 }')
+  count=$(printf '%s\n' "$nodes" | grep -c . || true)
+  [ "$count" -ge 1 ] || die "no Ready, schedulable node found${NODE_SELECTOR:+ for NODE_SELECTOR=$NODE_SELECTOR}$([ "$TOLERATE_ALL" = 1 ] || echo ' (tainted nodes are skipped: TOLERATE_ALL=1 includes them)')"
+  local per_node=$PODS_PER_NODE
+  if [ "$PODS" = auto ]; then
+    if [ "$ONE_NODE" = 1 ]; then
+      PODS=2; per_node=2
+      warn "PODS=auto: test $TEST shares one ReadWriteOnce volume, so all daemons run on ONE node - using PODS=2"
+    else
+      PODS=$(( count * PODS_PER_NODE ))
+      if [ "$PODS_PER_NODE" = 1 ]; then SPREAD=required; else SPREAD=even; fi
+      log "PODS=auto: $count nodes x $PODS_PER_NODE = $PODS daemons (spread: $SPREAD$([ "$TOLERATE_ALL" = 1 ] && echo ', all taints tolerated'))"
+    fi
+  else
+    [ "$PODS" -ge 1 ] 2>/dev/null || die "PODS must be a number or 'auto', got '$PODS'"
+    if [ "$ONE_NODE" = 1 ]; then per_node=$PODS; else per_node=$(( (PODS + count - 1) / count )); fi
+  fi
+  if [ "$CPU" = auto ]; then
+    local used milli
+    # node, namespace, release, cpu requests of the containers; finished pods do not count
+    used=$(kubectl get pods -A --no-headers --field-selector=status.phase!=Succeeded,status.phase!=Failed \
+             -o 'custom-columns=N:.spec.nodeName,NS:.metadata.namespace,I:.metadata.labels.app\.kubernetes\.io/instance,C:.spec.containers[*].resources.requests.cpu' 2>/dev/null) \
+      || { used=""; warn "CPU=auto: cannot list the pods of all namespaces - using the allocatable CPU of the nodes (other workloads are not subtracted)"; }
+    milli=$(printf '%s\n' "$used" | awk -v nodes="$nodes" -v ns="$NAMESPACE" -v rel="$REL" -v share="$CPU_SHARE" -v ppn="$per_node" '
+      function m(v) { if (v=="" || v ~ /none/) return 0; return (v ~ /m$/) ? v+0 : v*1000 }
+      BEGIN { n=split(nodes, l, "\n"); for (i=1;i<=n;i++) { split(l[i], f, " "); if (f[1]!="") free[f[1]]=m(f[2]) } }
+      ($1 in free) && !($2==ns && $3==rel) { k=split($4, c, ","); for (i=1;i<=k;i++) free[$1]-=m(c[i]) }
+      END { min=-1; for (x in free) if (min<0 || free[x]<min) min=free[x]; if (min<0) min=0
+            printf "%d\n", min*share/100/ppn }')
+    if [ "$milli" -ge 1000 ]; then CPU=$(( milli / 1000 ))
+    elif [ "$milli" -ge 100 ]; then CPU="${milli}m"
+    else die "CPU=auto: the weakest node has no free CPU for $per_node daemon(s) - free some CPU, use NODE_SELECTOR, or set CPU by hand"; fi
+    log "CPU=auto: $CPU per daemon (${CPU_SHARE}% of the free CPU of the weakest node, $per_node daemon(s) per node)"
+  fi
+}
+resolve_auto
+case "$SPREAD" in preferred|required|even|none) ;; *) die "SPREAD must be preferred | required | even | none" ;; esac
 
 # Record all parameters of this run
 {
@@ -184,7 +356,8 @@ K="kubectl -n $NAMESPACE"
   for v in PROTO TEST TNAME LAYOUT NAMESPACE REL PODS THREADS IODEPTH BS BS_MIX READ_PCT DURATION \
            FILES FILE_SIZE PVC_SIZE STORAGE_CLASS NFS_SERVER NFS_PATH NFS_STORAGE_CLASS NFS_VERS NCONNECT \
            RSIZE WSIZE NFS_EXTRA_OPTS S3_ENDPOINT S3_REGION BUCKET_PREFIX BUCKETS OBJ_SIZE OBJECTS \
-           TPUT_OBJ_SIZE TPUT_OBJECTS MIX_OBJECTS META_DIRS META_FILES EXTRA_ARGS SPREAD CPU MEMORY \
+           TPUT_OBJ_SIZE TPUT_OBJECTS MIX_OBJECTS META_DIRS META_FILES EXTRA_ARGS SPREAD CPU CPU_LIMIT MEMORY \
+           PODS_PER_NODE TOLERATE_ALL NODE_SELECTOR LAT_AVG_MAX LAT_P99_MAX \
            DEV_SIZE STORAGE_CACHE CACHE_FACTOR BLOCKVARPCT DETACH AIO RANGE_OBJ_SIZE RANGE_OBJECTS RANGE_BS; do
     [ -n "${!v:-}" ] && printf '%s=%q\n' "$v" "${!v}"
   done
@@ -192,6 +365,15 @@ K="kubectl -n $NAMESPACE"
 
 # ------------------------------------------------------------ helm values ----
 VALUES="$RUN_DIR/values.yaml"
+res_yaml() {   # res_yaml <indent> <cpu> <memory>: cpu limit only with CPU_LIMIT=1, memory always request = limit
+  local in=$1 c=$2 m=$3
+  [ -n "$c$m" ] || { echo "$in{}"; return; }
+  echo "${in}requests:"; [ -n "$c" ] && echo "$in  cpu: \"$c\""; [ -n "$m" ] && echo "$in  memory: \"$m\""
+  if [ -n "$m" ] || { [ "$CPU_LIMIT" = 1 ] && [ -n "$c" ]; }; then
+    echo "${in}limits:"; [ "$CPU_LIMIT" = 1 ] && [ -n "$c" ] && echo "$in  cpu: \"$c\""; [ -n "$m" ] && echo "$in  memory: \"$m\""
+  fi
+  return 0
+}
 render_values() {
   {
     echo "mode: service"
@@ -200,18 +382,35 @@ render_values() {
     [ -n "$IMAGE_REPO$IMAGE_TAG" ] && { echo "image:"; [ -n "$IMAGE_REPO" ] && echo "  repository: $IMAGE_REPO"; [ -n "$IMAGE_TAG" ] && echo "  tag: \"$IMAGE_TAG\""; }
     echo "serviceMode:"
     # 2 service instances: S3 mixes and async checkpoints run two coordinated elbencho runs at once
-    echo "  instancesPerPod: $([ "$FAMILY" = s3 ] || [ "$PROTO" = nfs ] && echo 2 || echo 1)"
+    echo "  instancesPerPod: $INSTANCES"
     echo "  controller: {enabled: true}"
     if [ -n "$CPU$MEMORY" ]; then
+      # CPU is the request of the whole pod. The 2nd service instance is idle in most tests and then gets
+      # nothing; in tests that load both instances the CPU is split between them.
+      local c1=$CPU c2=""
+      if [ "$INSTANCES" = 2 ]; then
+        if [ "$BOTH_ACTIVE" = 1 ] && [ -n "$CPU" ]; then c1="$(( $(to_milli "$CPU") / 2 ))m"; c2=$c1
+        elif [ "$CPU_LIMIT" = 1 ] && [ -n "$CPU" ]; then c2=100m; fi   # a Guaranteed pod needs limits on every container
+        echo "  extraInstanceResources:"
+        if [ -n "$c2" ] || [ "$BOTH_ACTIVE" = 1 ]; then res_yaml "    " "$c2" "$MEMORY"; else echo "    {}"; fi
+      fi
       echo "resources:"
-      for k in requests limits; do
-        echo "  $k:"; [ -n "$CPU" ] && echo "    cpu: \"$CPU\""; [ -n "$MEMORY" ] && echo "    memory: \"$MEMORY\""
-      done
+      res_yaml "  " "$c1" "$MEMORY"
     fi
+    [ "$TOLERATE_ALL" = 1 ] && echo "tolerations: [{operator: Exists}]"
     [ -n "$NODE_SELECTOR" ] && { echo "nodeSelector:"; echo "  \"${NODE_SELECTOR%%=*}\": \"${NODE_SELECTOR#*=}\""; }
     local sel="{matchLabels: {app.kubernetes.io/name: elbencho, app.kubernetes.io/instance: $REL}}"
+    if [ "$SPREAD" = even ] && [ "$ONE_NODE" != 1 ]; then
+      # the same number of daemons on every node (taints are honored unless all are tolerated anyway)
+      echo "topologySpreadConstraints:"
+      echo "  - maxSkew: 1"
+      echo "    topologyKey: kubernetes.io/hostname"
+      echo "    whenUnsatisfiable: DoNotSchedule"
+      [ "$TOLERATE_ALL" = 1 ] || echo "    nodeTaintsPolicy: Honor"
+      echo "    labelSelector: $sel"
+    fi
     echo "affinity:"
-    if [ "$FAMILY" != s3 ] && [ "$LAYOUT" = single ] && [ "${ACCESS_MODE:-ReadWriteOnce}" = ReadWriteOnce ] && [ "$PROTO" != nfs ]; then
+    if [ "$ONE_NODE" = 1 ]; then
       # one RWO volume shared by all daemons -> they must run on the same node
       echo "  podAffinity:"
       echo "    requiredDuringSchedulingIgnoredDuringExecution:"
@@ -306,9 +505,66 @@ eb_cmd() {
     "$extra" "$(printf '%q ' "$@")"
 }
 eb() {
-  local name=$1
+  local name=$1 rc=0
   log "phase '$name': elbencho ${*:4}"
-  ctl_run "$(eb_cmd "$@")" 2>&1 | tee -a "$RUN_DIR/console.log"
+  [ "$2" = 1 ] && cpu_begin elbencho
+  ctl_run "$(eb_cmd "$@")" 2>&1 | tee -a "$RUN_DIR/console.log" || rc=$?
+  [ "$2" = 1 ] && cpu_end "$name"
+  return $rc
+}
+
+# ------------------------------------------------ CPU used by the daemons ----
+# A saturated load generator looks exactly like slow storage: the result stops growing and the measured
+# latency rises. So the CPU time every daemon container used during a measured phase is read from its cgroup
+# counters (v2: cpu.stat, v1: cpuacct.usage) and compared with what the pod may use (CPU request, else the
+# cores of its node). Output per sample: usage_usec throttled_usec now_ns cores
+CPU_PROBE='u=; t=0; s=/sys/fs/cgroup/cpu.stat
+if grep -q usage_usec $s 2>/dev/null; then u=$(awk "/^usage_usec/{print \$2}" $s); t=$(awk "/^throttled_usec/{print \$2}" $s)
+else for f in /sys/fs/cgroup/cpuacct/cpuacct.usage /sys/fs/cgroup/cpu,cpuacct/cpuacct.usage; do [ -r $f ] && { u=$(($(cat $f)/1000)); break; }; done; fi
+[ -n "$u" ] && echo "$u ${t:-0} $(date +%s%N) $(nproc)"'
+cpu_sample() {   # cpu_sample <outfile> <container>...
+  local out=$1 i c n=0; shift
+  : > "$out"
+  for i in $(seq 0 $((PODS - 1))); do
+    for c in "$@"; do
+      { r=$($K exec "$FULL-$i" -c "$c" -- sh -c "$CPU_PROBE" 2>/dev/null) && [ -n "$r" ] && echo "$i $c $r" >> "$out"; } &
+      n=$((n + 1)); [ $((n % 16)) = 0 ] && wait
+    done
+  done
+  wait
+  return 0
+}
+CPU_CONTAINERS=""
+cpu_begin() {   # cpu_begin <container>...
+  [ "$CLIENT_CPU" = 1 ] || return 0
+  CPU_CONTAINERS="$*"
+  # shellcheck disable=SC2086
+  cpu_sample "$RUN_DIR/.cpu0" $CPU_CONTAINERS
+}
+cpu_end() {     # cpu_end <phase>...  -> <phase>.cpu: "avg_cores busiest_cores busiest_pct throttled_pct available_cores"
+  [ "$CLIENT_CPU" = 1 ] && [ -s "$RUN_DIR/.cpu0" ] || return 0
+  # shellcheck disable=SC2086
+  cpu_sample "$RUN_DIR/.cpu1" $CPU_CONTAINERS
+  local st ph
+  st=$(awk -v req="$([ -n "$CPU" ] && to_milli "$CPU" || echo 0)" '
+    FNR==NR { u[$1" "$2]=$3; t[$1" "$2]=$4; ns[$1" "$2]=$5; next }
+    ($1" "$2) in u { k=$1" "$2; dt=($5-ns[k])/1e9; if (dt<=0) next
+      cores[$1]+=($3-u[k])/1e6/dt; thr+=($4-t[k])/1e6; wall+=dt; np[$1]=$6; seen=1 }
+    END { if (!seen) exit
+      for (p in cores) { n++; sum+=cores[p]; if (cores[p]>=max) { max=cores[p]; av=(req>0 ? req/1000 : np[p]) } }
+      printf "%.1f %.1f %.0f %.0f %.1f\n", sum/n, max, (av>0 ? 100*max/av : 0), (wall>0 ? 100*thr/wall : 0), av }' "$RUN_DIR/.cpu0" "$RUN_DIR/.cpu1")
+  rm -f "$RUN_DIR/.cpu0" "$RUN_DIR/.cpu1"
+  [ -n "$st" ] || return 0
+  for ph in "$@"; do echo "$st" > "$RUN_DIR/$ph.cpu"; done
+  # shellcheck disable=SC2086
+  set -- $st
+  log "daemon CPU: average $1 cores per pod, busiest pod $2 of $5 cores ($3%)$([ "$4" -gt 0 ] && echo ", throttled $4% of the time")"
+  if [ "$3" -ge "$CLIENT_CPU_MAX" ]; then
+    warn "CLIENT-LIMITED: the busiest daemon used $3% of its CPU. This result measures the load generators, not the storage - add PODS or CPU instead of threads"
+  elif [ "$4" -ge 5 ]; then
+    warn "the daemons were CPU-throttled $4% of the time (cpu limit): latencies are inflated - raise CPU or run with CPU_LIMIT=0"
+  fi
+  return 0
 }
 
 # Run a shell script in the controller pod and stream its output; returns its exit code.
@@ -360,13 +616,13 @@ need_prepare() { # kind signature
 # ---------------------------------------------------------------- summary ---
 summarize() {
   local f out="$RUN_DIR/summary.txt"
-  local hdr="date,protocol,test,layout,pods,nconnect,threads,iodepth,block,phase,operation,iops,read_iops,total_iops,mib_s,read_mib_s,lat_avg_us,read_lat_avg_us,p99_us,read_p99_us,elapsed_ms_last,dataset_gib,run_dir,sweep_id"
+  local hdr="date,protocol,test,layout,pods,nconnect,threads,iodepth,block,phase,operation,iops,read_iops,total_iops,mib_s,read_mib_s,lat_avg_us,read_lat_avg_us,p99_us,read_p99_us,elapsed_ms_last,dataset_gib,run_dir,sweep_id,client_cpu_pct"
   if [ -f "$RESULTS_DIR/summary.csv" ] && [ "$(head -1 "$RESULTS_DIR/summary.csv")" != "$hdr" ]; then
     mv "$RESULTS_DIR/summary.csv" "$RESULTS_DIR/summary-old-$RUN_ID.csv"   # older column layout
   fi
   [ -f "$RESULTS_DIR/summary.csv" ] || echo "$hdr" > "$RESULTS_DIR/summary.csv"
   {
-    printf '%-14s %-10s %12s %12s %12s %10s %10s %11s %11s\n' PHASE OP IOPS RD-IOPS TOTAL-IOPS MiB/s RD-MiB/s LAT-us RD-LAT-us
+    printf '%-14s %-10s %12s %12s %12s %10s %10s %11s %11s %5s\n' PHASE OP IOPS RD-IOPS TOTAL-IOPS MiB/s RD-MiB/s LAT-us RD-LAT-us CPU%
     for f in $(ls -tr "$RUN_DIR"/*.csv 2>/dev/null); do
       [ -e "$f" ] || continue
       # p99 per operation from the human readable result file: "OP w_p99 r_p99"
@@ -375,7 +631,7 @@ summarize() {
         /IO (wr )?lat % us/ { if (match($0, / 99%<=[0-9]+/)) w[op]=substr($0,RSTART+6,RLENGTH-6) }
         /IO rd lat % us/    { if (match($0, / 99%<=[0-9]+/)) r[op]=substr($0,RSTART+6,RLENGTH-6) }
         END { for (o in w) printf "%s=%s:%s;", o, w[o], r[o] }' "${f%.csv}.txt" 2>/dev/null || true)
-      awk -F, -v phase="$(basename "$f" .csv)" -v sum="$RESULTS_DIR/summary.csv" -v meta="$RUN_ID,$PROTO,$TEST-$TNAME,$LAYOUT,$PODS,${NCONNECT:-}" -v dir="$RUN_DIR" -v sw="${SWEEP_ID:-}" -v p99s="$p99s" -v dsg="$(awk -v b="${DATASET_BYTES:-0}" 'BEGIN{ if (b>0) printf "%.1f", b/1073741824 }')" '
+      awk -F, -v phase="$(basename "$f" .csv)" -v sum="$RESULTS_DIR/summary.csv" -v meta="$RUN_ID,$PROTO,$TEST-$TNAME,$LAYOUT,$PODS,${NCONNECT:-}" -v dir="$RUN_DIR" -v sw="${SWEEP_ID:-}" -v p99s="$p99s" -v cpu="$(cut -d' ' -f3 "${f%.csv}.cpu" 2>/dev/null || true)" -v dsg="$(awk -v b="${DATASET_BYTES:-0}" 'BEGIN{ if (b>0) printf "%.1f", b/1073741824 }')" '
         BEGIN { n=split(p99s, a, ";"); for (i=1;i<=n;i++) if (split(a[i], kv, "=")==2) { split(kv[2], wr, ":"); pw[kv[1]]=wr[1]; pr[kv[1]]=wr[2] } }
         NR==1 { for (i=1;i<=NF;i++) h[$i]=i; next }
         # [first] = all workers still running (stonewall). If that phase was too short to measure
@@ -387,8 +643,8 @@ summarize() {
           if (op ~ /MKDIRS|DELDIRS|STAT|DELFILES|LISTOBJ|MKBUCKETS/ || iops=="0") iops=g("entries/s [first]")
           r=g("rwmix read IOPS [first]"); if (r=="") r=g("rwmix read entries/s [first]")
           tot=iops+r
-          printf "%-14s %-10s %12s %12s %12s %10s %10s %11s %11s\n", phase, op, iops, (r==""?"-":r), tot, g("MiB/s [first]"), (r==""?"-":g("rwmix read MiB/s [first]")), g("IO lat us [avg]"), g("rwmix read IO lat us [avg]")
-          printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", meta, g("threads"), g("IO depth"), g("block size"), phase, op, iops, r, tot, g("MiB/s [first]"), g("rwmix read MiB/s [first]"), g("IO lat us [avg]"), g("rwmix read IO lat us [avg]"), pw[op], pr[op], $(h["time ms [last]"]), dsg, dir, sw >> sum
+          printf "%-14s %-10s %12s %12s %12s %10s %10s %11s %11s %5s\n", phase, op, iops, (r==""?"-":r), tot, g("MiB/s [first]"), (r==""?"-":g("rwmix read MiB/s [first]")), g("IO lat us [avg]"), g("rwmix read IO lat us [avg]"), (cpu==""?"-":cpu)
+          printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", meta, g("threads"), g("IO depth"), g("block size"), phase, op, iops, r, tot, g("MiB/s [first]"), g("rwmix read MiB/s [first]"), g("IO lat us [avg]"), g("rwmix read IO lat us [avg]"), pw[op], pr[op], $(h["time ms [last]"]), dsg, dir, sw, cpu >> sum
         }' "$f"
     done
   } | tee "$out"
@@ -407,6 +663,18 @@ finish() {
   log "RESULTS  $PROTO / $TEST-$TNAME  (pods=$PODS layout=$LAYOUT)"
   summarize
   if declare -F post_summary >/dev/null; then post_summary | tee -a "$RUN_DIR/summary.txt"; fi
+  if [ -n "$LAT_AVG_MAX$LAT_P99_MAX" ] && [ "$LAT" = 1 ]; then
+    local g ops mibs avg p99 cpu rest v
+    while IFS=$'\t' read -r g ops mibs avg p99 cpu rest; do
+      [ -n "$g" ] || continue
+      case "$(verdict "$avg" "$p99" "$cpu")" in
+        ok)     v="within the target" ;;
+        slo)    v="OVER the target" ;;
+        client) v="CLIENT-LIMITED (daemon CPU ${cpu}%): not a storage result" ;;
+      esac
+      printf 'TARGET %-14s avg %s ms, p99 %s ms  ->  %s  (%s)\n' "$g" "$avg" "$p99" "$v" "$(slo_text)"
+    done <<< "$(run_rows "$RUN_DIR")" | tee -a "$RUN_DIR/summary.txt"
+  fi
   log "saved to: $RUN_DIR"
   if [ "$KEEP" != 1 ]; then
     log "KEEP=0: removing deployment $REL"

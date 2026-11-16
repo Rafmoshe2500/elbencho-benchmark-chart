@@ -173,7 +173,10 @@ imagePullPolicy: {{ .Values.image.pullPolicy }}
 securityContext:
   {{- toYaml . | nindent 2 }}
 {{- end }}
-{{- with .Values.resources }}
+{{- /* extra service instances can get their own resources (key "instanceResources", see statefulset.yaml) */}}
+{{- $res := .Values.resources }}
+{{- if hasKey . "instanceResources" }}{{ $res = .instanceResources }}{{ end }}
+{{- with $res }}
 resources:
   {{- toYaml . | nindent 2 }}
 {{- end }}
@@ -236,6 +239,10 @@ affinity:
 {{- end }}
 {{- with $.Values.tolerations }}
 tolerations:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with $.Values.topologySpreadConstraints }}
+topologySpreadConstraints:
   {{- toYaml . | nindent 2 }}
 {{- end }}
 {{- end }}

@@ -72,6 +72,10 @@ serviceMode:
   # Use 2+ to run several coordinated benchmarks at the same time against the same pods/volumes
   # (e.g. separate reader and writer runs for S3 mixed workloads).
   instancesPerPod: 1
+  # -- Resources of the 2nd, 3rd... service instance of a pod. null = same as `resources` (every instance
+  # gets the full amount). Set it (e.g. {} for none) when only the first instance does the heavy work,
+  # so that an idle instance does not reserve CPU.
+  extraInstanceResources: null
   # -- Idle "controller" Deployment (no storage) to `kubectl exec` into and run `elbencho --hosts ...`
   # from, so the master process does not steal CPU from a daemon. Its env has ELBENCHO_HOSTS
   # (instance 1), ELBENCHO_HOSTS_2, ... ready to use.
@@ -185,6 +189,8 @@ resources: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}
+# -- Pod topology spread constraints (e.g. the same number of daemons on every node)
+topologySpreadConstraints: []
 
 # -- Security context for the pod
 podSecurityContext: {}
