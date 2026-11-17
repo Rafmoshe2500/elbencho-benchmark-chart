@@ -157,6 +157,13 @@ Environment variables for the elbencho container
       name: {{ include "elbencho.s3SecretName" . }}
       key: {{ .Values.s3.secretKeySecretKey }}
 {{- end }}
+{{- /* elbencho (3.3-3 too) ignores AWS_ENDPOINT_URL: the ready-made S3 flags for runs by hand, e.g.
+       elbencho $ELBENCHO_S3 --hosts "$ELBENCHO_HOSTS" -w -t 8 -n 1 -N 100 -s 4k -b 4k mybucket
+       Kubernetes expands $(VAR) when the container starts; the pod spec keeps only the variable names. */}}
+{{- if .Values.s3.endpoints }}
+- name: ELBENCHO_S3
+  value: "--s3endpoints $(AWS_ENDPOINT_URL){{ if or .Values.s3.existingSecret .Values.s3.accessKey }} --s3key $(AWS_ACCESS_KEY_ID) --s3secret $(AWS_SECRET_ACCESS_KEY){{ end }}{{ if .Values.s3.region }} --s3region $(AWS_REGION){{ end }}"
+{{- end }}
 {{- end }}
 {{- with .Values.extraEnv }}
 {{ toYaml . }}

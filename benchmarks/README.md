@@ -19,6 +19,7 @@ benchmarks/
 │   └── 01-write-iops.sh ... 17-find-max.sh       (tests that don't apply to a protocol are not there)
 ├── run-suite.sh                     run several tests in a row
 ├── compare.sh                       the same tests on two or more storage systems, side by side
+├── deploy.sh                        only deploy the daemons, for elbencho runs by hand
 ├── cleanup.sh                       remove deployments / PVCs
 ├── lib/                             engine (run.sh) + test definitions per family
 └── results/                         created on first run (git-ignored)
@@ -139,7 +140,25 @@ See "Comparing storage systems" below.
 ./benchmarks/s3/16-range-read.sh    $S RANGE_OBJ_SIZE=512m PODS=8
 ```
 
-### 9. Long runs and cleanup
+### 9. elbencho by hand, without the test scripts
+```bash
+./benchmarks/deploy.sh raw-block $B PODS=auto       # only deploy: daemons on every node + controller pod
+kubectl -n elbencho-bench exec -it deploy/eb-blk-elbencho-ctl -- bash
+elbencho --hosts "$ELBENCHO_HOSTS" -w --direct --rand -t 16 --iodepth 32 -b 4k -s 100g --nosvcshare \
+  --timelimit 120 --lat --latpercent /dev/elbencho
+```
+- `deploy.sh` uses the same settings as the tests (`PODS`, `CPU`, volumes, ...) and prints the exact commands for
+  the protocol. After any test (`KEEP=1`, the default) the deployment stays, so you can also exec in right away.
+- The controller pod has `ELBENCHO_HOSTS` (all daemons, port 1611) and `ELBENCHO_HOSTS_2` (port 1612, nfs/s3,
+  for a second run at the same time). On S3, `$ELBENCHO_S3` holds `--s3endpoints/--s3key/--s3secret`: elbencho
+  3.3-3 does **not** read the endpoint from `AWS_ENDPOINT_URL` (verified), so pass it on every run.
+- Targets: `/dev/elbencho` (raw block), `/data` (nfs, xfs; the suite's dataset is `/data/f1..fN`), bucket names (s3).
+- On per-pod volumes (raw block, xfs, nfs multi) add `--nosvcshare`, so every daemon works on its whole volume.
+  Never on shared targets (one bucket, one export dir): see "Which data does each host work on?" in the main README.
+- Without the suite at all, the chart itself has `mode=standalone` (a shell pod), `mode=job` and a coordinator Job:
+  see the main [README](../README.md).
+
+### 10. Long runs and cleanup
 ```bash
 DETACH=1 ./benchmarks/raw-block/17-find-max.sh $B SWEEP_TEST=01   # default: survives a lost VPN/SSH connection
 ./benchmarks/cleanup.sh raw-block                          # remove deployments + volumes of a protocol

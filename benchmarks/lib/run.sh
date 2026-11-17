@@ -173,6 +173,7 @@ case "$TEST" in
   14) TNAME=ai-training ;;         15) TNAME=ai-inference ;;
   16) TNAME=range-read ;;
   17) TNAME=find-max ;;
+  deploy) TNAME=deploy ;;           # only deploy the daemons + controller, for elbencho runs by hand
   *) die "unknown test id '$TEST'" ;;
 esac
 case "$TEST" in
@@ -199,7 +200,7 @@ esac
 # "block" of the IOPS tests is the object size; throughput tests use 16 MiB multipart parts.
 if [ "$FAMILY" = s3 ]; then
   case "$TEST" in
-    01|02|08|09) THREADS=${USER_THREADS:-32}; IODEPTH=1; BS=${USER_BS:-$OBJ_SIZE}
+    01|02|08|09) THREADS=${USER_THREADS:-32}; IODEPTH=1; OBJ_SIZE=${USER_BS:-$OBJ_SIZE}; BS=$OBJ_SIZE   # BS = OBJ_SIZE here
                  # verified with elbencho 3.3-3: one PUT/GET per object is always synchronous, --iodepth changes nothing
                  [ "${USER_IODEPTH:-1}" = 1 ] || warn "IODEPTH has no effect on S3 whole-object requests (concurrency = PODS x THREADS) - using IODEPTH=1; raise THREADS instead" ;;
     03|04)       THREADS=${USER_THREADS:-16}; IODEPTH=${USER_IODEPTH:-1}; BS=${USER_BS:-16m} ;;
@@ -888,6 +889,29 @@ aio_preflight() {
 }
 
 deploy
+if [ "$TEST" = deploy ]; then
+  case "$FAMILY" in
+    s3)    tgt="$BUCKET_PREFIX-1"; s3='$ELBENCHO_S3 '; ex="-d -w -t 8 -n 1 -N 1000 -s 4k -b 4k $tgt" ;;
+    block) tgt=/dev/elbencho; s3=""; ex="-w --direct --rand -t 8 --iodepth 16 -b 4k -s ${DEV_SIZE:-10g} $SHARE --timelimit 60 $tgt" ;;
+    *)     tgt="/data/f[1-$FILES]"; s3=""; ex="-r --direct --rand -t 8 --iodepth 16 -b 4k -s $FILE_SIZE $SHARE --timelimit 60 '$tgt'" ;;
+  esac
+  cat <<EOT
+
+$PODS elbencho daemons are up ($REL). Run elbencho by hand from the controller pod, which knows all daemons:
+
+  kubectl -n $NAMESPACE exec -it $CTL -- bash
+  elbencho ${s3}--hosts "\$ELBENCHO_HOSTS" $ex
+
+  ELBENCHO_HOSTS   all daemons (port 1611)$([ "$INSTANCES" = 2 ] && printf '\n  ELBENCHO_HOSTS_2 second service instance of every daemon (port 1612), for a second run at the same time')
+  target           $tgt$([ "$FAMILY" = s3 ] && printf '  (ELBENCHO_S3 = --s3endpoints/--s3key/--s3secret)')
+$([ "$FAMILY" != s3 ] && echo "  dataset          prepared by the suite: $([ "$FAMILY" = file ] && echo "/data/f1..f$FILES of $FILE_SIZE" || echo "the first $DEV_SIZE of /dev/elbencho") per daemon (if a test ran before)")
+$([ "$LAYOUT" = multi ] && [ "$FAMILY" != s3 ] && echo "  --nosvcshare     every daemon has its own volume / directory: each one works on the full path")
+
+Or a single daemon on its own:  kubectl -n $NAMESPACE exec -it $FULL-0 -c elbencho -- bash
+Remove everything:              ./benchmarks/cleanup.sh $PROTO
+EOT
+  exit 0
+fi
 aio_preflight
 run_test
 finish
