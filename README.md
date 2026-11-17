@@ -188,10 +188,13 @@ depends on the flags. Tested with 3 daemons:
 
 [`benchmarks/`](benchmarks) has ready-made load tests for **NFS, XFS, raw block devices and S3**:
 max IOPS and throughput, 70/30 mixes with different block sizes, single-target tests, QD1 latency,
-metadata and scaling sweeps. Every parameter can be changed per run. See [`benchmarks/README.md`](benchmarks/README.md).
+metadata and scaling sweeps, a search for the maximum within a latency target (on a pod per node), and a
+side-by-side comparison of storage systems. Every parameter can be changed per run. See [`benchmarks/README.md`](benchmarks/README.md).
 
 ```bash
 ./benchmarks/xfs/02-read-iops.sh STORAGE_CLASS=my-xfs-sc PODS=4 THREADS=16 IODEPTH=32
+./benchmarks/raw-block/17-find-max.sh STORAGE_CLASS=array-a SWEEP_TEST=01     # max write IOPS within the latency target
+./benchmarks/compare.sh raw-block TARGETS="arrayA=sc-array-a arrayB=sc-array-b"   # two arrays side by side
 ```
 
 ---

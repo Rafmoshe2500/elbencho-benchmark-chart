@@ -16,16 +16,16 @@ dataset_bytes() {   # the tested range of every device
 }
 dataset_hint() { echo "Raise PVC_SIZE (or DEV_SIZE)$( [ "$LAYOUT" = multi ] && echo ' / PODS')."; }
 SHARE=""; [ "$LAYOUT" = multi ] && SHARE="--nosvcshare"
-SIZE=(); [ -n "$DEV_SIZE" ] && SIZE=(-s "$DEV_SIZE")
+SIZE=(); [ -n "$DEV_SIZE" ] && SIZE=(-s "$DEV_SIZE")   # DEV_SIZE is set by size_dataset (run.sh) unless given
 TIMED=(--timelimit "$DURATION" --infloop)
 
 prepare() {
   # Fill the device once: reads from never-written (thin) blocks are unrealistically fast.
-  local sig="dev=${DEV_SIZE:-full},pods=$PODS"
-  if need_prepare dataset "$sig"; then
+  local sig="dev=${DEV_SIZE:-full}"
+  if need_prepare_pods dataset "$sig"; then
     log "preconditioning: sequential write of the ${DEV_SIZE:-whole} device on every daemon"
     eb prepare 0 ELBENCHO_HOSTS -w -t "$PREP_THREADS" -b 1m --direct "${SIZE[@]}" $SHARE "$DEV"
-    ds_set dataset "$sig"
+    ds_set dataset "$sig,pods=$([ "$LAYOUT" = multi ] && echo "$PODS" || echo 0)"
   else
     log "device already preconditioned ($sig) - skipping (PREPARE=always to force)"
   fi

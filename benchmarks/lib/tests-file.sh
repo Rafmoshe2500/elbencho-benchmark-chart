@@ -5,8 +5,7 @@
 #                  every daemon works on its full own dataset.
 #   layout single: all daemons share ONE volume / directory; the dataset is split between them.
 
-: "${FILES:=8}"
-: "${FILE_SIZE:=4g}"
+: "${FILES:=8}"               # FILE_SIZE is set by size_dataset (run.sh) unless given
 : "${PREP_THREADS:=8}"
 : "${META_DIRS:=10}"        # test 11: dirs per thread
 : "${META_FILES:=1000}"     # test 11: files per dir
@@ -23,11 +22,13 @@ SHARE=""; [ "$LAYOUT" = multi ] && SHARE="--nosvcshare"
 TIMED=(--timelimit "$DURATION" --infloop)
 
 prepare() {
-  local sig="files=$FILES,size=$FILE_SIZE,pods=$PODS"
-  if need_prepare dataset "$sig"; then
+  # multi: every daemon has its own files, so the marker records how many daemons have them; fewer daemons
+  # later find their files, more daemons need a new prepare. single: one shared set, the pod count is irrelevant.
+  local sig="files=$FILES,size=$FILE_SIZE"
+  if need_prepare_pods dataset "$sig"; then
     log "preparing dataset: $FILES x $FILE_SIZE per $([ "$LAYOUT" = multi ] && echo daemon || echo 'shared volume')"
     eb prepare 0 ELBENCHO_HOSTS -w -t "$PREP_THREADS" -s "$FILE_SIZE" -b 1m --direct $SHARE "$PATHS"
-    ds_set dataset "$sig"
+    ds_set dataset "$sig,pods=$([ "$LAYOUT" = multi ] && echo "$PODS" || echo 0)"
   else
     log "dataset already prepared ($sig) - skipping (PREPARE=always to force)"
   fi

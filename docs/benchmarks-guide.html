@@ -311,7 +311,13 @@ footer .wrap { padding-block: 18px; }
         <tr><td class="k">CPU</td><td class="k">– (עם PODS=auto: auto)</td><td>CPU request לכל פוד, למשל <code>CPU=8</code>. <code>auto</code>: <code>CPU_SHARE</code>% מה-CPU הפנוי בצומת החלש ביותר, מחולק בין הפודים שלו. <code>none</code>: בלי request</td></tr>
         <tr><td class="k">CPU_SHARE / CPU_LIMIT</td><td class="k">80 / 0</td><td>אחוז ה-CPU הפנוי שמוקצה עם <code>CPU=auto</code>. <code>CPU_LIMIT=1</code> מוסיף limit שווה ל-request (Guaranteed, ליבות ייעודיות עם static CPU manager). ברירת המחדל בלי limit, כי throttling נראה כמו latency של ה-storage</td></tr>
         <tr><td class="k">MEMORY</td><td class="k">–</td><td>request = limit לכל daemon, למשל <code>MEMORY=16Gi</code></td></tr>
-        <tr><td class="k">LAT_AVG_MAX / LAT_P99_MAX</td><td class="k">– (S3: 30 / 90)</td><td>יעד latency במילישניות, ממוצע ו-p99. כל ריצה מדפיסה אם עמדה ביעד, ובדיקה 17 עוצרת בו</td></tr>
+        <tr><td class="k">LAT_READ_AVG_MAX / LAT_READ_P99_MAX</td><td class="k">2 / 5 (S3: 30 / 90)</td><td>יעד latency לקריאה במילישניות, ממוצע ו-p99. כל ריצה מדפיסה אם עמדה ביעד, ובדיקה 17 עוצרת בו</td></tr>
+        <tr><td class="k">LAT_WRITE_AVG_MAX / LAT_WRITE_P99_MAX</td><td class="k">Block/XFS 2 / 10 · NFS 5 / 15 · S3 30 / 90</td><td>יעד latency לכתיבה. ערך ריק מבטל יעד</td></tr>
+        <tr><td class="k">LAT_AVG_MAX / LAT_P99_MAX</td><td class="k">–</td><td>קובע את היעד לקריאה ולכתיבה יחד</td></tr>
+        <tr><td class="k">TPUT_LAT_FACTOR</td><td class="k">10 (S3: 1)</td><td>מכפיל את היעדים בבדיקות של בלוקים גדולים (03, 04, 07)</td></tr>
+        <tr><td class="k">TPUT_DATASET</td><td class="k">4t</td><td>גודל ה-dataset המינימלי בסך הכול (NFS/XFS/Block)</td></tr>
+        <tr><td class="k">EXPECTED_IOPS / IOPS_COVER_MIN</td><td class="k">500000 / 20</td><td>ה-dataset גדל כך ש-IO אקראי של 4k בקצב הזה יעבור עליו פעם אחת רק אחרי IOPS_COVER_MIN דקות</td></tr>
+        <tr><td class="k">DATASET_SIZE</td><td class="k">–</td><td>גודל מפורש בסך הכול, גובר על שני הקודמים</td></tr>
         <tr><td class="k">CLIENT_CPU / CLIENT_CPU_MAX</td><td class="k">1 / 80</td><td>מדידת ה-CPU שהפודים צרכו בכל שלב נמדד. אם הפוד העמוס עבר את האחוז הזה מה-CPU שלו, התוצאה מסומנת CLIENT-LIMITED</td></tr>
         <tr><td class="k">SPREAD</td><td class="k">preferred</td><td>פיזור הפודים על צמתים: preferred, required (פוד אחד לצומת), even (מספר שווה בכל צומת), none</td></tr>
         <tr><td class="k">NODE_SELECTOR</td><td class="k">–</td><td>למשל <code>role=bench</code></td></tr>
@@ -374,6 +380,41 @@ cores      = target_IOPS / IOPS_per_core       <span class="c"># ראה "ללי�
   </div>
 
   <div class="block">
+    <h2>יעדי latency</h2>
+    <p>כל ריצה משווה את ה-latency שלה ליעד של הפרוטוקול ומדפיסה <code>within the target</code> או <code>OVER the target</code>. בדיקה 17 עוצרת ביעד ומדווחת על הצעד הטוב ביותר שעמד בו. לקריאה ולכתיבה יש יעדים נפרדים.</p>
+    <div class="tbl"><table>
+      <thead><tr><th>פרוטוקול</th><th>קריאה: ממוצע / p99</th><th>כתיבה: ממוצע / p99</th><th>בלוקים גדולים (03, 04, 07)</th></tr></thead>
+      <tbody>
+        <tr><td class="k">Block, XFS (NVMe/TCP)</td><td>2 / 5ms</td><td>2 / 10ms</td><td>× 10</td></tr>
+        <tr><td class="k">NFS</td><td>2 / 5ms</td><td>5 / 15ms</td><td>× 10</td></tr>
+        <tr><td class="k">S3</td><td>30 / 90ms</td><td>30 / 90ms</td><td>× 1</td></tr>
+      </tbody>
+    </table></div>
+    <p>מאיפה המספרים: NVMe/TCP מוסיף כ-0.1ms לכתיבת 4k מעל הרשת; 0.3–0.5ms טיפוסי מקצה לקצה. XFS על NVMe מקומי: p99 של כ-0.6ms. מערכי all-flash בתוצאות SPC-1 מבוקרות: ממוצע 0.26–0.96ms בעומס מלא. מערכות NFS all-flash ב-SPECstorage 2020: ממוצע 1.0–1.4ms בשיא. יעדי הכתיבה הם הרמה ה"מקלה": הרבה מעל מה שמערך תקין מראה, כך ש-find-max עוצר כשהמערכת עמוסה באמת. ליישומים רגישים: <code>LAT_WRITE_AVG_MAX=1 LAT_WRITE_P99_MAX=5</code>.</p>
+  </div>
+
+  <div class="block">
+    <h2>Dataset ב-NFS, XFS ו-Block</h2>
+    <p>dataset אחד לכל פריסה, שכל הבדיקות משתמשות בו, כך שמעבר בין בדיקות לא כותב אותו מחדש. הגודל בסך הכול:</p>
+<div class="code"><button class="copy" type="button">העתק</button><pre>total = max( TPUT_DATASET , EXPECTED_IOPS × 4k × 60 × IOPS_COVER_MIN )
+      = max( 4 TiB , 500,000 × 4k × 60 × 20 = 2.3 TiB ) = 4 TiB        <span class="c"># ברירת מחדל</span>
+per pod = total / PODS                                              <span class="c"># multi. ב-single: total משותף</span></pre></div>
+    <ul>
+      <li><b>Throughput:</b> קוראים וכותבים כמה TB, הרבה מעבר לכל cache של בקר.</li>
+      <li><b>IOPS:</b> IO אקראי בקצב <code>EXPECTED_IOPS</code> צריך 20 דקות כדי לעבור פעם אחת על כל ה-dataset, כך שבלוקים לא נדרסים או נקראים שוב בזמן הזה. אחרי כל בדיקת IOPS מודפס הזמן בפועל לפי הקצב שנמדד, עם אזהרה והגודל הנדרש אם הוא קצר מדי.</li>
+      <li>ה-volumes (<code>PVC_SIZE</code>) מחושבים כך שיכילו אותו. הבדיקה הראשונה בפריסה כותבת את ה-dataset (4 TiB ב-5 GiB/s ≈ 14 דקות); הבאות משתמשות בו.</li>
+    </ul>
+  </div>
+
+  <div class="block">
+    <h2>השוואה בין מערכות</h2>
+    <p><code>compare.sh</code> מריץ את אותן בדיקות על שתי מערכות או יותר, אחת אחרי השנייה, עם אותם פודים, אותו dataset ואותם יעדים, ומדפיס טבלה זו לצד זו. לפני שמערכת רצה, הפודים של האחרות מוקטנים ל-0 כדי שלא יתחרו על CPU ורשת.</p>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/compare.sh raw-block TARGETS="arrayA=sc-array-a arrayB=sc-array-b"
+<span class="c"># ברירת מחדל: ITEMS="max:01 max:02 max:03 max:04" = find-max לכתיבה וקריאה, IOPS ו-throughput</span>
+./benchmarks/compare.sh xfs TARGETS="arrayA=sc-array-a arrayB=sc-array-b" ITEMS="max:01 max:02 03 04 05"</pre></div>
+  </div>
+
+  <div class="block">
     <h2>Cache וצמצום נתונים</h2>
     <p>אם ה-dataset נכנס ב-cache של ה-storage, מודדים את ה-cache ולא את הדיסקים. כל ריצה מדפיסה את גודל ה-dataset שלה. עם <code>STORAGE_CACHE</code> היא גם משווה אותו ל-cache, ומזהירה או עוצרת אם הוא קטן מדי. כדי למצוא איפה ה-cache נגמר, מריצים sweep על גודל ה-dataset ומחפשים את הנקודה שבה ה-IOPS צונחים: <code>SWEEP_FILE_SIZE</code> ב-NFS/XFS, <code>SWEEP_DEV_SIZE</code> ב-Block, <code>SWEEP_OBJECTS</code> ב-S3.</p>
     <div class="tbl"><table>
@@ -416,7 +457,7 @@ cores      = target_IOPS / IOPS_per_core       <span class="c"># ראה "ללי�
         <tr><td class="k">NCONNECT</td><td class="k">8</td><td>חיבורי TCP לכל mount (0 = כבוי). משפיע מאוד על IOPS</td></tr>
         <tr><td class="k">RSIZE / WSIZE</td><td class="k">1048576</td><td>ל-IO רנדומלי קטן כדאי לנסות גם 65536</td></tr>
         <tr><td class="k">NFS_EXTRA_OPTS</td><td class="k">hard</td><td>למשל <code>hard,noatime,actimeo=0</code></td></tr>
-        <tr><td class="k">FILES / FILE_SIZE</td><td class="k">8 / 4g</td><td>ה-dataset לכל פוד (multi) או בסך הכול (single)</td></tr>
+        <tr><td class="k">FILES / FILE_SIZE</td><td class="k">8 / לפי ה-dataset</td><td>קבצים לפוד. FILE_SIZE מחושב מגודל ה-dataset הכולל (ראה "Dataset" בעמוד הראשי); ערך מפורש גובר</td></tr>
         <tr><td class="k">PVC_SIZE</td><td class="k">500Gi</td><td>גודל נומינלי. NFS לא אוכף אותו</td></tr>
       </tbody>
     </table></div>
@@ -467,10 +508,10 @@ dataset          = PODS × FILES × FILE_SIZE   <span class="c"># multi. ב-sing
   <div class="block">
     <h2>הרצות מומלצות</h2>
     <div class="runs">
-      <div class="run"><h3>מציאת המקסימום <span class="why">פוד על כל צומת, עומק תור שגדל עד p99 של 5ms. פעם לקריאה ופעם לכתיבה</span></h3>
-<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/17-find-max.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench SWEEP_TEST=02 LAT_P99_MAX=5
-./benchmarks/nfs/17-find-max.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench SWEEP_TEST=01 LAT_P99_MAX=5
-./benchmarks/nfs/17-find-max.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench SWEEP_TEST=04 BS=1m FILE_SIZE=16g</pre></div></div>
+      <div class="run"><h3>מציאת המקסימום <span class="why">פוד על כל צומת, עומק תור שגדל עד היעד: קריאה 2/5ms, כתיבה 5/15ms (ממוצע/p99)</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/17-find-max.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench SWEEP_TEST=02
+./benchmarks/nfs/17-find-max.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench SWEEP_TEST=01
+./benchmarks/nfs/17-find-max.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench SWEEP_TEST=04</pre></div></div>
 
       <div class="run"><h3>בסיס מלא <span class="why">כל הבדיקות 01–11 על אותה פריסה, דקתיים לכל שלב</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/run-suite.sh nfs NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench \
@@ -482,7 +523,7 @@ dataset          = PODS × FILES × FILE_SIZE   <span class="c"># multi. ב-sing
 
       <div class="run"><h3>מקסימום Read throughput <span class="why">בלוקים של 4m, קבצים גדולים, rsize של 1M</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/04-read-throughput.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench \
-  PODS=8 THREADS=8 BS=4m FILE_SIZE=16g NCONNECT=16</pre></div></div>
+  PODS=8 THREADS=8 BS=4m NCONNECT=16</pre></div></div>
 
       <div class="run"><h3>כמה nconnect באמת עוזר <span class="why">אותה בדיקה עם 1, 4, 8 ו-16 חיבורים</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/12-scaling-sweep.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench \
@@ -494,7 +535,7 @@ dataset          = PODS × FILES × FILE_SIZE   <span class="c"># multi. ב-sing
 
       <div class="run"><h3>תמהיל 70/30 יציב <span class="why">5 דקות, כדי לעבור את ה-cache של השרת</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/05-mix70-32k-128k.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench \
-  PODS=4 IODEPTH=16 DURATION=300 FILE_SIZE=16g</pre></div></div>
+  PODS=4 IODEPTH=16 DURATION=300</pre></div></div>
 
       <div class="run"><h3>איפה נגמר ה-cache של השרת <span class="why">אותה בדיקה עם dataset שגדל: 128GB עד 8TB בסך הכול</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/12-scaling-sweep.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench \
@@ -538,8 +579,8 @@ dataset          = PODS × FILES × FILE_SIZE   <span class="c"># multi. ב-sing
       <thead><tr><th>מפתח</th><th>ברירת מחדל</th><th>משמעות</th></tr></thead>
       <tbody>
         <tr><td class="k">STORAGE_CLASS</td><td class="k">חובה</td><td>StorageClass שמפרמט XFS. ב-CSI: <code>csi.storage.k8s.io/fstype: xfs</code>. ב-local PV: <code>fsType: xfs</code></td></tr>
-        <tr><td class="k">PVC_SIZE</td><td class="k">50Gi</td><td>לכל פוד (multi), או ה-volume המשותף (single)</td></tr>
-        <tr><td class="k">FILES / FILE_SIZE</td><td class="k">8 / 4g</td><td>ה-dataset. חייב להיכנס ב-PVC_SIZE</td></tr>
+        <tr><td class="k">PVC_SIZE</td><td class="k">לפי ה-dataset</td><td>לכל פוד (multi), או ה-volume המשותף (single). volume קיים גדול מספיק נשמר; קטן יותר או StorageClass אחר נמחק ונוצר מחדש</td></tr>
+        <tr><td class="k">FILES / FILE_SIZE</td><td class="k">8 / לפי ה-dataset</td><td>קבצים לפוד וגודלם. ערך מפורש גובר</td></tr>
         <tr><td class="k">ACCESS_MODE</td><td class="k">ReadWriteOnce</td><td>ב-RWO בדיקות 08–09 ממקמות את כל הפודים על צומת אחד</td></tr>
       </tbody>
     </table></div>
@@ -580,13 +621,14 @@ dataset     = PODS × FILES × FILE_SIZE            <span class="c"># FILES × F
   <div class="block">
     <h2>הרצות מומלצות</h2>
     <div class="runs">
-      <div class="run"><h3>מציאת המקסימום <span class="why">פוד על כל צומת, עומק תור שגדל עד p99 של 5ms</span></h3>
-<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/xfs/17-find-max.sh STORAGE_CLASS=my-xfs-sc PVC_SIZE=200Gi FILE_SIZE=8g SWEEP_TEST=02 LAT_P99_MAX=5
-./benchmarks/xfs/17-find-max.sh STORAGE_CLASS=my-xfs-sc PVC_SIZE=200Gi FILE_SIZE=8g SWEEP_TEST=01 LAT_P99_MAX=5</pre></div></div>
+      <div class="run"><h3>מציאת המקסימום <span class="why">פוד על כל צומת, עומק תור שגדל עד היעד: קריאה 2/5ms, כתיבה 2/10ms (ממוצע/p99)</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/xfs/17-find-max.sh STORAGE_CLASS=my-xfs-sc SWEEP_TEST=02
+./benchmarks/xfs/17-find-max.sh STORAGE_CLASS=my-xfs-sc SWEEP_TEST=01
+./benchmarks/xfs/17-find-max.sh STORAGE_CLASS=my-xfs-sc SWEEP_TEST=04</pre></div></div>
 
       <div class="run"><h3>בסיס מלא <span class="why">PVC של 200Gi לכל פוד, dataset של 64GB לפוד</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/run-suite.sh xfs STORAGE_CLASS=my-xfs-sc \
-  PODS=4 PVC_SIZE=200Gi FILES=8 FILE_SIZE=8g DURATION=120 SPREAD=required</pre></div></div>
+  PODS=4 DURATION=120 SPREAD=required</pre></div></div>
 
       <div class="run"><h3>מקסימום Read IOPS <span class="why">16 threads × עומק 32 = 512 בקשות פתוחות לפוד</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/xfs/02-read-iops.sh STORAGE_CLASS=my-xfs-sc PODS=4 THREADS=16 IODEPTH=32</pre></div></div>
@@ -602,7 +644,7 @@ dataset     = PODS × FILES × FILE_SIZE            <span class="c"># FILES × F
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/xfs/01-write-iops.sh STORAGE_CLASS=my-xfs-sc PODS=4 IODEPTH=32 DURATION=1800</pre></div></div>
 
       <div class="run"><h3>volume יחיד תחת עומס <span class="why">4 פודים על PVC אחד באותו צומת</span></h3>
-<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/xfs/08-single-target-read-iops.sh STORAGE_CLASS=my-xfs-sc PODS=4 PVC_SIZE=200Gi</pre></div></div>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/xfs/08-single-target-read-iops.sh STORAGE_CLASS=my-xfs-sc PODS=4 DATASET_SIZE=1t</pre></div></div>
 
       <div class="run"><h3>איפה נגמר ה-cache <span class="why">גודל קובץ שגדל, עם בדיקה מול ה-cache</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/xfs/12-scaling-sweep.sh STORAGE_CLASS=my-xfs-sc PVC_SIZE=1Ti SWEEP_TEST=02 SWEEP_PODS=4 \
@@ -632,8 +674,8 @@ dataset     = PODS × FILES × FILE_SIZE            <span class="c"># FILES × F
       <thead><tr><th>מפתח</th><th>ברירת מחדל</th><th>משמעות</th></tr></thead>
       <tbody>
         <tr><td class="k">STORAGE_CLASS</td><td class="k">חובה</td><td>StorageClass שתומך ב-volumeMode: Block</td></tr>
-        <tr><td class="k">PVC_SIZE</td><td class="k">50Gi</td><td>גודל ההתקן לכל פוד (multi), או ההתקן המשותף (single)</td></tr>
-        <tr><td class="k">DEV_SIZE</td><td class="k">כל ההתקן</td><td>הגבלת הטווח הנבדק, למשל <code>100g</code>. מקצר גם את המילוי הראשוני</td></tr>
+        <tr><td class="k">PVC_SIZE</td><td class="k">לפי ה-dataset</td><td>גודל ההתקן לכל פוד (multi), או ההתקן המשותף (single). התקן קיים גדול מספיק נשמר; קטן יותר או StorageClass אחר נוצר מחדש</td></tr>
+        <tr><td class="k">DEV_SIZE</td><td class="k">לפי ה-dataset</td><td>הטווח הנבדק בכל התקן. ערך מפורש גובר, למשל <code>100g</code></td></tr>
         <tr><td class="k">ACCESS_MODE</td><td class="k">ReadWriteOnce</td><td>לשיתוף התקן בין צמתים צריך RWX block (למשל Ceph RBD)</td></tr>
       </tbody>
     </table></div>
@@ -675,13 +717,18 @@ fill_time    = PVC_SIZE / device_write_MiB_s      <span class="c"># פעם אח�
   <div class="block">
     <h2>הרצות מומלצות</h2>
     <div class="runs">
-      <div class="run"><h3>מציאת המקסימום <span class="why">פוד על כל צומת, עומק תור שגדל עד p99 של 2ms</span></h3>
-<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/raw-block/17-find-max.sh STORAGE_CLASS=my-block-sc PVC_SIZE=200Gi SWEEP_TEST=02 LAT_P99_MAX=2
-./benchmarks/raw-block/17-find-max.sh STORAGE_CLASS=my-block-sc PVC_SIZE=200Gi SWEEP_TEST=01 LAT_P99_MAX=2</pre></div></div>
+      <div class="run"><h3>השוואה בין שני מערכים מבוזרים <span class="why">אותן בדיקות, אותם פודים ואותו dataset על כל מערך, וטבלה זו לצד זו</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/compare.sh raw-block TARGETS="arrayA=sc-array-a arrayB=sc-array-b"</pre></div></div>
+
+      <div class="run"><h3>מציאת המקסימום <span class="why">פוד על כל צומת, עומק תור שגדל עד היעד: קריאה 2/5ms, כתיבה 2/10ms (ממוצע/p99)</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/raw-block/17-find-max.sh STORAGE_CLASS=my-block-sc SWEEP_TEST=01   <span class="c"># Max write IOPS</span>
+./benchmarks/raw-block/17-find-max.sh STORAGE_CLASS=my-block-sc SWEEP_TEST=02   <span class="c"># Max read IOPS</span>
+./benchmarks/raw-block/17-find-max.sh STORAGE_CLASS=my-block-sc SWEEP_TEST=03   <span class="c"># Max write throughput</span>
+./benchmarks/raw-block/17-find-max.sh STORAGE_CLASS=my-block-sc SWEEP_TEST=04   <span class="c"># Max read throughput</span></pre></div></div>
 
       <div class="run"><h3>בסיס מלא <span class="why">התקן של 200Gi לכל פוד. המילוי הראשוני רץ פעם אחת</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/run-suite.sh raw-block STORAGE_CLASS=my-block-sc \
-  PODS=4 PVC_SIZE=200Gi DURATION=120 SPREAD=required</pre></div></div>
+  PODS=4 DURATION=120 SPREAD=required</pre></div></div>
 
       <div class="run"><h3>מקסימום Write IOPS, מצב יציב <span class="why">עומק 64 למשך 10 דקות</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/raw-block/01-write-iops.sh STORAGE_CLASS=my-block-sc PODS=4 IODEPTH=64 DURATION=600</pre></div></div>

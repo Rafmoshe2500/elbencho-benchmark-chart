@@ -18,47 +18,134 @@ benchmarks/
 │   ├── profile.env                  protocol defaults (nconnect, StorageClass, endpoint, ...)
 │   └── 01-write-iops.sh ... 17-find-max.sh       (tests that don't apply to a protocol are not there)
 ├── run-suite.sh                     run several tests in a row
+├── compare.sh                       the same tests on two or more storage systems, side by side
 ├── cleanup.sh                       remove deployments / PVCs
 ├── lib/                             engine (run.sh) + test definitions per family
 └── results/                         created on first run (git-ignored)
 ```
 
-## Quick start
+## Examples: every kind of run
+
+Every parameter is `KEY=VALUE`, as an argument or as an environment variable. Arguments win over the environment,
+and both win over `profile.env` and the test defaults. Every example works the same way on every protocol;
+only the connection settings differ:
+
+| protocol | connection settings |
+|---|---|
+| `raw-block` | `STORAGE_CLASS=<a StorageClass with volumeMode: Block>` |
+| `xfs` | `STORAGE_CLASS=<a StorageClass that formats XFS>` (CSI: `parameters.csi.storage.k8s.io/fstype: xfs`) |
+| `nfs` | `NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench`, or `NFS_STORAGE_CLASS=<an RWX StorageClass>` |
+| `s3` | `S3_ENDPOINT=http://s3-1:9000,http://s3-2:9000 S3_SECRET_NAME=s3-creds` (Secret: see below) |
 
 ```bash
-# XFS: a StorageClass that formats volumes as XFS (CSI: parameters.csi.storage.k8s.io/fstype: xfs)
-./benchmarks/xfs/02-read-iops.sh STORAGE_CLASS=my-xfs-sc PODS=4
+B="STORAGE_CLASS=array-a"                                  # raw block / xfs
+N="NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench"            # nfs
+S="S3_ENDPOINT=http://s3-1:9000,http://s3-2:9000 S3_SECRET_NAME=s3-creds"
 
-# Raw block device: a StorageClass that supports volumeMode: Block
-./benchmarks/raw-block/01-write-iops.sh STORAGE_CLASS=my-block-sc PODS=4 IODEPTH=32
-
-# NFS: the chart mounts the export itself with your mount options
-./benchmarks/nfs/04-read-throughput.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench NCONNECT=16 PODS=8
-
-# S3
+# S3 credentials, once
 kubectl create namespace elbencho-bench
 kubectl -n elbencho-bench create secret generic s3-creds \
   --from-literal=AWS_ACCESS_KEY_ID=... --from-literal=AWS_SECRET_ACCESS_KEY=...
-./benchmarks/s3/02-read-iops.sh S3_ENDPOINT=http://minio.minio.svc:9000 S3_SECRET_NAME=s3-creds PODS=4
-
-# The whole suite of one protocol (deployment and datasets are reused between the tests)
-./benchmarks/run-suite.sh xfs STORAGE_CLASS=my-xfs-sc PODS=4 DURATION=120
-./benchmarks/run-suite.sh s3 TESTS="01 02 05" S3_ENDPOINT=... S3_SECRET_NAME=s3-creds
-
-# Queue-depth curve, AI training with async checkpoints, inference
-./benchmarks/xfs/13-iodepth-sweep.sh STORAGE_CLASS=my-xfs-sc PODS=4
-./benchmarks/nfs/14-ai-training.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export TRAIN_PRESET=unet3d CKPT_MODE=async PODS=8
-./benchmarks/s3/15-ai-inference.sh S3_ENDPOINT=... S3_SECRET_NAME=s3-creds MODEL_SIZE=140g PODS=16
-
-# Find the maximum within a latency target, with a load generator on every node (see "Finding the maximum")
-./benchmarks/s3/17-find-max.sh S3_ENDPOINT=... S3_SECRET_NAME=s3-creds SWEEP_TEST=02
-
-# Remove everything of a protocol (StatefulSet PVCs and NFS PVs included)
-./benchmarks/cleanup.sh xfs
 ```
 
-Every parameter is `KEY=VALUE`, either as an argument (as above) or as an environment variable.
-Arguments win over the environment, and both win over `profile.env` and the test defaults.
+### 1. One test at a fixed load
+```bash
+./benchmarks/raw-block/01-write-iops.sh       $B PODS=4 THREADS=16 IODEPTH=32    # 4k random write
+./benchmarks/raw-block/02-read-iops.sh        $B PODS=4 THREADS=16 IODEPTH=32    # 4k random read
+./benchmarks/raw-block/03-write-throughput.sh $B PODS=4 BS=1m                    # sequential write
+./benchmarks/raw-block/04-read-throughput.sh  $B PODS=4 BS=4m                    # sequential read
+./benchmarks/xfs/05-mix70-32k-128k.sh         $B PODS=4 READ_PCT=80              # 80/20 random mix
+./benchmarks/nfs/02-read-iops.sh              $N PODS=8 NCONNECT=16 RSIZE=65536
+./benchmarks/s3/02-read-iops.sh               $S PODS=8 THREADS=64 OBJ_SIZE=64k
+./benchmarks/xfs/08-single-target-read-iops.sh $B PODS=4      # all pods on ONE volume (same node for RWO)
+./benchmarks/raw-block/10-latency-qd1.sh      $B PODS=1 DURATION=120              # pure latency, QD1
+./benchmarks/nfs/11-metadata.sh               $N PODS=4                           # create / stat / delete
+```
+
+### 2. The maximum within the latency target (test 17)
+A load generator on every node (`PODS=auto`, `CPU=auto`), growing load, stops at the latency target of the
+protocol (see "Latency targets"). One run per direction and kind:
+```bash
+./benchmarks/raw-block/17-find-max.sh $B SWEEP_TEST=01     # max write IOPS   (IODEPTH 1 -> 128)
+./benchmarks/raw-block/17-find-max.sh $B SWEEP_TEST=02     # max read IOPS
+./benchmarks/raw-block/17-find-max.sh $B SWEEP_TEST=03     # max write MiB/s  (IODEPTH 1 -> 32, 1m blocks)
+./benchmarks/raw-block/17-find-max.sh $B SWEEP_TEST=04     # max read MiB/s
+./benchmarks/xfs/17-find-max.sh       $B SWEEP_TEST=01
+./benchmarks/nfs/17-find-max.sh       $N SWEEP_TEST=02 NCONNECT=16
+./benchmarks/s3/17-find-max.sh        $S SWEEP_TEST=02     # THREADS 8 -> 256
+
+# own targets, longer steps, two daemons per node, only worker nodes
+./benchmarks/raw-block/17-find-max.sh $B SWEEP_TEST=01 LAT_WRITE_AVG_MAX=1 LAT_WRITE_P99_MAX=5 \
+  DURATION=180 PODS_PER_NODE=2 NODE_SELECTOR=node-role.kubernetes.io/worker= TOLERATE_ALL=0
+# own ladder: more threads per pod and deeper queues
+./benchmarks/raw-block/17-find-max.sh $B SWEEP_TEST=02 THREADS=32 SWEEP_IODEPTH="8 16 32 64 128 256"
+```
+
+### 3. Compare two storage systems (same tests, same pods, same dataset)
+```bash
+# two distributed block arrays: max write/read IOPS and MiB/s on each, then a table side by side
+./benchmarks/compare.sh raw-block TARGETS="arrayA=sc-array-a arrayB=sc-array-b"
+# the same on XFS, with fixed-load tests too
+./benchmarks/compare.sh xfs TARGETS="arrayA=sc-array-a arrayB=sc-array-b" ITEMS="max:01 max:02 03 04 05"
+# two NFS servers with different export paths
+./benchmarks/compare.sh nfs TARGETS="old=10.0.0.10 new=10.0.0.20" ARGS_old="NFS_PATH=/vol1" ARGS_new="NFS_PATH=/exports/bench"
+# two S3 systems
+./benchmarks/compare.sh s3 TARGETS="minio=http://minio:9000 ceph=http://rgw:8080" S3_SECRET_NAME=s3-creds
+```
+See "Comparing storage systems" below.
+
+### 4. Sweeps: how a value changes the result (tests 12, 13)
+```bash
+./benchmarks/raw-block/12-scaling-sweep.sh $B SWEEP_TEST=02 SWEEP_PODS="8 4 2 1"          # load generators
+./benchmarks/raw-block/13-iodepth-sweep.sh $B SWEEP_TEST=01 PODS=4                         # queue depth 1..128
+./benchmarks/xfs/12-scaling-sweep.sh       $B SWEEP_TEST=02 PODS=4 SWEEP_THREADS="4 8 16 32"
+./benchmarks/nfs/12-scaling-sweep.sh       $N SWEEP_TEST=02 SWEEP_PODS=4 SWEEP_NCONNECT="1 4 8 16"
+./benchmarks/s3/12-scaling-sweep.sh        $S SWEEP_TEST=01 SWEEP_PODS="2 4 8" SWEEP_THREADS="32 64"
+# where the storage cache ends: the same test on a growing dataset
+./benchmarks/xfs/12-scaling-sweep.sh       $B SWEEP_TEST=02 SWEEP_PODS=4 SWEEP_FILE_SIZE="16g 64g 256g"
+./benchmarks/raw-block/12-scaling-sweep.sh $B SWEEP_TEST=02 SWEEP_PODS=4 SWEEP_DEV_SIZE="100g 400g 1600g"
+```
+
+### 5. A whole suite on one deployment
+```bash
+./benchmarks/run-suite.sh raw-block $B PODS=auto DURATION=120              # 01..10 (11 needs a filesystem)
+./benchmarks/run-suite.sh xfs $B TESTS="01 02 03 04" PODS=8 CONTINUE=1     # continue after a failed test
+./benchmarks/run-suite.sh s3 $S TESTS="01 02 05" PODS=8
+```
+
+### 6. Datasets, data content and cache
+```bash
+./benchmarks/raw-block/02-read-iops.sh $B DATASET_SIZE=10t                 # an explicit total dataset
+./benchmarks/xfs/01-write-iops.sh      $B EXPECTED_IOPS=2000000            # dataset for 20 min at 2M IOPS
+./benchmarks/nfs/02-read-iops.sh       $N STORAGE_CACHE=1t CACHE_CHECK=fail   # stop if the dataset < 2 x cache
+./benchmarks/xfs/03-write-throughput.sh $B BLOCKVARPCT=50                  # 2:1 compressible data
+./benchmarks/raw-block/01-write-iops.sh $B DURATION=1800                   # steady state of the flash
+./benchmarks/raw-block/02-read-iops.sh $B PREPARE=always                   # write the dataset again
+```
+
+### 7. Pods, CPU and the cluster
+```bash
+./benchmarks/raw-block/02-read-iops.sh $B PODS=auto                         # a pod on every node, CPU=auto
+./benchmarks/raw-block/02-read-iops.sh $B PODS=auto CPU=16 CPU_LIMIT=1      # 16 dedicated cores per pod
+./benchmarks/raw-block/02-read-iops.sh $B PODS=6 SPREAD=required NODE_SELECTOR=role=bench MEMORY=8Gi
+./benchmarks/xfs/01-write-iops.sh $B HELM_ARGS="--set securityContext.seccompProfile.type=Unconfined"
+./benchmarks/raw-block/01-write-iops.sh $B IMAGE_REPO=registry.local/elbencho IMAGE_TAG=3.3-3
+```
+
+### 8. AI workloads (nfs, s3)
+```bash
+./benchmarks/nfs/14-ai-training.sh  $N TRAIN_PRESET=unet3d CKPT_MODE=async PODS=8 TRAIN_REQUIRED_MIBS=1500
+./benchmarks/s3/15-ai-inference.sh  $S MODEL_SIZE=140g MODEL_SHARDS=30 PODS=16
+./benchmarks/s3/16-range-read.sh    $S RANGE_OBJ_SIZE=512m PODS=8
+```
+
+### 9. Long runs and cleanup
+```bash
+DETACH=1 ./benchmarks/raw-block/17-find-max.sh $B SWEEP_TEST=01   # default: survives a lost VPN/SSH connection
+./benchmarks/cleanup.sh raw-block                          # remove deployments + volumes of a protocol
+./benchmarks/cleanup.sh raw-block RELEASE_PREFIX=cmp-arraya  # remove one system of a comparison
+./benchmarks/cleanup.sh all DELETE_NAMESPACE=1
+```
 
 ## The tests
 
@@ -75,24 +162,26 @@ Arguments win over the environment, and both win over `profile.env` and the test
 | 09 | Max write IOPS on ONE target | same as 08, write | same | same |
 | 10 | Latency at QD1 *(extra)* | 1 thread, iodepth 1, 4k random read + write, p99/p99.9/p99.99 | same | 1 thread PUT + GET |
 | 11 | Metadata *(extra)* | create / stat / delete of many empty files | n/a | PUT / LIST / HEAD / DELETE |
-| 12 | Scaling sweep *(extra)* | runs another test for `SWEEP_PODS="1 2 4 8"` (+ `SWEEP_NCONNECT` for NFS) and prints a table | same | same |
-| 13 | IODEPTH sweep | runs another test (default 02) for `SWEEP_IODEPTH="1 2 4 8 16 32 64 128"`: IOPS, MiB/s, avg + p99 latency per depth | same | n/a |
+| 12 | Scaling sweep *(extra)* | runs another test for `SWEEP_PODS="1 2 4 8"` (+ `SWEEP_NCONNECT`, `SWEEP_THREADS`, `SWEEP_IODEPTH`, dataset size) and prints a table | same | same |
+| 13 | IODEPTH sweep | runs another test (default 02) for `SWEEP_IODEPTH="1 2 4 8 16 32 64 128"` | same | n/a |
 | 14 | AI training | NFS: MLPerf-style epochs over a sample dataset + checkpoint + restore (see below) | n/a | same on S3 |
 | 15 | AI inference | NFS: model load at cold start + lookups + KV-cache offload (see below) | n/a | same on S3 |
 | 16 | Range reads | n/a | n/a | random byte-range GETs (`RANGE_BS`, default `64k:1,1m:2,8m:1`) at random offsets of large objects (`RANGE_OBJ_SIZE`, 256m). This is the Parquet/ORC pattern of Trino/Spark |
-| 17 | Find max | load ladder on `SWEEP_TEST` (IODEPTH `1 … 128`) that stops at the latency target, at saturation, or when the daemons run out of CPU | same | same, with a THREADS ladder (`8 … 256`) and the default target avg 30 ms / p99 90 ms |
+| 17 | Find max | load ladder on `SWEEP_TEST` (IODEPTH `1 … 128`, throughput `1 … 32`) that stops at the latency target, at saturation, or when the daemons run out of CPU | same | same, with a THREADS ladder (`8 … 256`) |
+
+`compare.sh` runs any of these on two or more storage systems and prints them side by side.
 
 Tests 12 and 13 can be combined freely: `SWEEP_PODS`, `SWEEP_NCONNECT`, `SWEEP_THREADS`, `SWEEP_IODEPTH` and the dataset size
 (`SWEEP_FILE_SIZE` for nfs/xfs, `SWEEP_DEV_SIZE` for raw-block, `SWEEP_OBJECTS` for s3) all work in both
 (12 defaults to a pod sweep, 13 to an iodepth sweep at the current `PODS`). The table shows where IOPS stop growing
-while p99 latency keeps rising.
+while latency keeps rising, and a verdict per step against the latency target.
 
 **Two layouts:**
 - **Tests 01–07 (multi):** every daemon has its **own** target, and the result is the total for the whole system.
   - XFS / raw block: one PVC per pod.
   - NFS: a private directory per pod on the export (`subPathExpr`).
   - S3: load spread over `BUCKETS` buckets.
-  - File and block tests use `--nosvcshare`, so every daemon works on its full own dataset.
+  - File and block tests use `--nosvcshare`, so every daemon works on its full own part of the dataset.
 - **Tests 08–09 (single):** **one** target shared by all daemons. The dataset is split between them, which shows
   whether a single volume or bucket becomes the bottleneck.
   - A RWO volume (XFS / raw block) can only be shared by pods on the **same node**, so the runner adds the
@@ -100,71 +189,177 @@ while p99 latency keeps rising.
 
 ## Parameters
 
-### General (all tests)
-| Key | Default | Meaning |
-|---|---|---|
-| `PODS` | 2 (test 17: `auto`) | number of elbencho daemons (load-generating pods). `auto` = `PODS_PER_NODE` daemons on every Ready, schedulable node (`NODE_SELECTOR` narrows the set) |
-| `PODS_PER_NODE` | 1 | `PODS=auto`: daemons per node. 1 uses a required anti-affinity, more use an even topology spread |
-| `TOLERATE_ALL` | 1 with `PODS=auto`, else 0 | 1 = the pods tolerate every taint, so control-plane and other tainted nodes are used too. 0 = tainted nodes are skipped |
-| `THREADS` | per test (16 / 8) | I/O threads per daemon |
-| `IODEPTH` | per test (16 / 4 / 8) | async I/O queue depth per thread (libaio). Concurrency per pod = THREADS × IODEPTH. **No effect on the S3 IOPS tests** (see "Finding the maximum") |
-| `BS` | 4k (IOPS), 1m (throughput) | block size. For S3 IOPS tests it is the object size (`OBJ_SIZE`), for S3 throughput the part size (16m) |
-| `BS_MIX` | per test 05/06/07 | weighted block-size mix, e.g. `16k:2,64k:1` (2/3 16k, 1/3 64k) |
-| `READ_PCT` | 70 | read share in tests 05–07 |
-| `DURATION` | 60 (test 10: 30) | seconds per measured phase (`--timelimit` + `--infloop`) |
-| `LAT_THREADS` / `LAT_IODEPTH` | 1 / 1 | test 10 only |
-| `CPU` | – (`auto` with `PODS=auto`) | CPU request per daemon pod, e.g. `CPU=8`. `auto` = `CPU_SHARE` % of the free CPU (allocatable minus the requests of other pods) of the weakest node, divided between its daemons, in whole cores. `none` = no request |
-| `CPU_SHARE` / `CPU_LIMIT` | 80 / 0 | share used by `CPU=auto`. `CPU_LIMIT=1` adds a limit equal to the request (Guaranteed QoS, exclusive cores with the static CPU manager). The default is no limit, because CFS throttling shows up as storage latency |
-| `MEMORY` | – | request = limit per daemon, e.g. `MEMORY=16Gi` |
-| `LAT_AVG_MAX` / `LAT_P99_MAX` | – (S3: 30 / 90) | latency target in ms (average / p99). Every run prints whether it met the target; test 17 stops there. `LAT_AVG_MAX=` switches one off |
-| `CLIENT_CPU` / `CLIENT_CPU_MAX` | 1 / 80 | measure the CPU the daemons used in every measured phase; above this % of its CPU the busiest daemon makes the result `CLIENT-LIMITED` |
-| `SPREAD` | preferred | spread daemons over nodes: `preferred`, `required` (one per node), `even` (same number on every node), `none` |
-| `NODE_SELECTOR` | – | e.g. `NODE_SELECTOR=role=bench` |
-| `PREPARE` | auto | dataset creation: `auto` (once per deployment/size), `always`, `never` |
-| `KEEP` | 1 | keep the deployment after the test (faster next test). `KEEP=0` removes it |
-| `LAT` | 1 | latency average + percentiles |
-| `EXTRA_ARGS` | – | extra elbencho args for the measured phase, e.g. `"--cpu --svcelapsed"` |
-| `NAMESPACE` | elbencho-bench | |
-| `IMAGE_REPO` / `IMAGE_TAG` | chart default | e.g. a mirror in an air-gapped cluster |
-| `HELM_ARGS` | – | extra helm args, e.g. `"--set tolerations[0].operator=Exists"` |
-| `STORAGE_CACHE` | – | cache of the **storage system**: controller DRAM/NVRAM + SSD cache, e.g. `512g`. Not the pod's or node's RAM (`--direct` bypasses that). See "Dataset vs. storage cache" |
-| `CACHE_FACTOR` / `CACHE_CHECK` | 2 / warn | required dataset ≥ factor × cache; `warn`, `fail` (stop before deploying) or `off` |
-| `BLOCKVARPCT` | – (elbencho default 100) | content of written data, see "Data reduction" |
-| `AIO` | auto | async IO (libaio, used when `IODEPTH` > 1) on nfs/xfs/raw-block. `auto`: checked once per run in a pod, and if the cluster blocks it, `THREADS × IODEPTH` threads with `IODEPTH=1` are used instead. `emulate`: always do that. `native`: no check, no fallback. `AIO_MAX_THREADS` (1024) caps the thread count. See "Async IO blocked" |
-| `DETACH` | 1 | benchmarks run detached in the controller pod and survive a lost connection (VPN/SSH/laptop sleep). Output is polled every `POLL` (5) s, and the runner gives up after `RECONNECT_TIMEOUT` (3600) s offline. Ctrl+C stops the benchmark in the cluster too |
+"What changing it does" is the effect on the measurement. Concurrency = requests in flight = `PODS × THREADS ×
+IODEPTH` (S3 IOPS tests: `PODS × THREADS`).
+
+### Load and test shape (all protocols)
+| Key | Default | What it is | What changing it does |
+|---|---|---|---|
+| `PODS` | 2 (test 17, compare: `auto`) | elbencho daemons (load generators). `auto` = `PODS_PER_NODE` on every Ready node | More pods = more concurrency **and** more client CPU and network. Raise it when a result is `CLIENT-LIMITED` or one node's network is full. Changes the dataset split (one dataset in total) |
+| `PODS_PER_NODE` | 1 | `PODS=auto`: daemons per node | 2+ uses more of each node's CPU; helps when one pod per node is CPU-bound. NFS: pods on one node share the mount's connections, so it helps less |
+| `TOLERATE_ALL` | 1 with `PODS=auto`, else 0 | tolerate every taint | 1 = control-plane / tainted nodes generate load too. 0 = only untainted nodes |
+| `NODE_SELECTOR` | – | `key=value` node label | Limits the load generators (and `PODS=auto`) to these nodes, e.g. keep them off the storage nodes |
+| `SPREAD` | preferred | `preferred`, `required`, `even`, `none` | `required` = at most one pod per node (fails if there are more pods than nodes); `even` = the same number on every node; `none` = may pile up on one node and hit its CPU/network |
+| `THREADS` | 16 (IOPS), 8 (throughput); S3 32 / 16 | I/O threads per daemon | More threads = more concurrency and more CPU. On S3 IOPS tests it is the only per-pod concurrency knob |
+| `IODEPTH` | 16 (IOPS), 4 (throughput) | async queue depth per thread (libaio) | Raises concurrency at low CPU cost: IOPS grow until the storage saturates, then only latency grows. No effect on S3 whole-object requests |
+| `BS` | 4k (IOPS), 1m (throughput) | block size per IO (S3: object size / part size) | Bigger blocks = fewer IOPS, more MiB/s, higher latency per IO. 4k shows the IO path, 1m+ the bandwidth |
+| `BS_MIX` | per test 05/06/07 | weighted sizes, e.g. `16k:2,64k:1` | Makes the mix look like a real application |
+| `READ_PCT` | 70 | read share in tests 05–07 | Higher = more reads; writes are usually the costlier side on flash with protection (RAID/EC/replication) |
+| `DURATION` | 60 (test 10: 30) | seconds per measured phase | Longer = steadier numbers; 1800 for flash steady state (garbage collection, write cache full) |
+| `LAT_THREADS` / `LAT_IODEPTH` | 1 / 1 | test 10 load | Above 1 test 10 is no longer pure single-request latency |
+| `EXTRA_ARGS` | – | extra elbencho args for the measured phase | Anything elbencho supports, e.g. `--lathisto` |
+
+### Latency targets
+| Key | Default | What it is | What changing it does |
+|---|---|---|---|
+| `LAT_READ_AVG_MAX` / `LAT_READ_P99_MAX` | block, xfs, nfs: 2 / 5 ms; S3: 30 / 90 | target for reads | Every run prints `TARGET ... within / OVER`; test 17 stops at the first step over it. Higher = test 17 goes to a higher load (more IOPS, worse latency) |
+| `LAT_WRITE_AVG_MAX` / `LAT_WRITE_P99_MAX` | block, xfs: 2 / 10; nfs: 5 / 15; S3: 30 / 90 | target for writes | Same, for writes. An empty value (`LAT_WRITE_P99_MAX=`) switches that target off |
+| `LAT_AVG_MAX` / `LAT_P99_MAX` | – | sets reads **and** writes at once | Overrides the protocol defaults of both directions |
+| `TPUT_LAT_FACTOR` | 10 (S3: 1) | multiplier of the targets for 03, 04, 07 | A 1 MiB IO takes longer than a 4k IO. Lower = throughput ladders stop earlier |
+| `MIN_GAIN` | 3 | % a step must gain over the best so far | Higher = test 17 calls "saturated" sooner |
+| `FIND_STOP` | 1 (test 17), 0 (12/13) | stop a ladder at over-target / client-limited / 2 flat steps | 0 = run every step anyway (the whole curve) |
+| `SWEEP_TEST` | 02 | the test a sweep / test 17 runs | 01 write IOPS, 02 read IOPS, 03 / 04 write / read throughput, any of 01–11, 16 |
+| `SWEEP_IODEPTH` / `SWEEP_THREADS` / `SWEEP_PODS` / `SWEEP_NCONNECT` | per test | the steps of a sweep | Defines the ladder; finer steps = a more precise maximum, more runs |
+
+### Datasets (nfs, xfs, raw block)
+One dataset per deployment, used by every test, so switching tests does not write it again.
+| Key | Default | What it is | What changing it does |
+|---|---|---|---|
+| `TPUT_DATASET` | 4t | minimum total dataset (all pods) | Bigger = the throughput tests read/write more than any cache holds; longer first prepare (4 TiB at 5 GiB/s ≈ 14 min) |
+| `EXPECTED_IOPS` | 500000 | 4k IOPS the system is expected to reach | The dataset grows to `EXPECTED_IOPS × 4k × 60 × IOPS_COVER_MIN` if that is more than `TPUT_DATASET` (500k → 2.3 TiB) |
+| `IOPS_COVER_MIN` | 20 | minutes until the random IO has gone once through the dataset | Higher = bigger dataset, fewer re-hits of the same block (cache, overwrite). After every IOPS test the runner prints the real figure and warns below it |
+| `DATASET_SIZE` | – | explicit total size | Overrides the two above |
+| `FILES` | 8 | files per daemon (nfs, xfs) | More files = more parallel files; the dataset size stays the same |
+| `FILE_SIZE` / `DEV_SIZE` | from the dataset | size per file (nfs, xfs) / tested range per device (raw block) | Explicit values win, per daemon |
+| `PVC_SIZE` | sized for the dataset | volume per daemon (xfs, raw block) | Existing volumes that are large enough are reused; smaller ones (or another StorageClass) are deleted and created again, and the dataset is prepared again |
+| `PREPARE` | auto | `auto`, `always`, `never` | `auto` writes the dataset once (again only when its size changes or more pods need it) |
+| `STORAGE_CACHE` | – | cache of the storage system, e.g. `512g` | Warns (or stops, `CACHE_CHECK=fail`) when the dataset < `CACHE_FACTOR` × cache |
+| `CACHE_FACTOR` / `CACHE_CHECK` | 2 / warn | | |
+| `BLOCKVARPCT` | – (100) | random share of every written block | 100 = incompressible (worst case), 50 ≈ 2:1 compressible, 0 = dedupable. Lower values make arrays with data reduction look faster |
+
+### Client resources and measurement
+| Key | Default | What it is | What changing it does |
+|---|---|---|---|
+| `CPU` | – (`auto` with `PODS=auto`) | CPU request per daemon pod; `auto` = `CPU_SHARE` % of the free CPU of the weakest node, split between its daemons; `none` | More CPU = more requests per pod before it becomes `CLIENT-LIMITED` |
+| `CPU_SHARE` | 80 | share used by `CPU=auto` | Higher = more CPU for the pods, less for the rest of the node |
+| `CPU_LIMIT` | 0 | 1 = limit = request (Guaranteed, exclusive cores with the static CPU manager) | 1 avoids noisy neighbours; but CFS throttling then shows up as storage latency (the runner warns) |
+| `MEMORY` | – | memory request = limit per daemon | Needed for S3 throughput: `THREADS × IODEPTH × BS` per pod |
+| `CLIENT_CPU` / `CLIENT_CPU_MAX` | 1 / 80 | measure the daemons' CPU per phase; threshold for `CLIENT-LIMITED` | Lower threshold = stricter: fewer results accepted as storage results |
+| `LAT` | 1 | latency average + percentiles | 0 = no latency (and no target check) |
+| `LIVE` | 1 | a progress line every 5 s | 0 = quieter logs |
+| `AIO` / `AIO_MAX_THREADS` | auto / 1024 | async IO check and fallback (nfs, xfs, raw block) | See "Async IO blocked" |
+
+### Deployment and operation
+| Key | Default | What it is | What changing it does |
+|---|---|---|---|
+| `NAMESPACE` | elbencho-bench | namespace of everything | Separate namespaces = independent deployments |
+| `RELEASE_PREFIX` | eb | helm release prefix (`eb-blk`, `eb-xfs-single`, ...) | Another prefix = another deployment with its own volumes/dataset (compare.sh uses `cmp-<label>`) |
+| `KEEP` | 1 | keep the deployment after the test | 0 = remove it (and its volumes!) after the test: the next test prepares again |
+| `IMAGE_REPO` / `IMAGE_TAG` | chart default | | e.g. a mirror in an air-gapped cluster |
+| `HELM_ARGS` | – | extra helm args | e.g. `"--set tolerations[0].operator=Exists"` |
+| `DETACH` / `POLL` / `RECONNECT_TIMEOUT` | 1 / 5 / 3600 | run detached in the controller pod; poll interval; give up offline after | 0 = the run stops when kubectl loses the connection |
+| `WAIT_TIMEOUT` | 10m | how long to wait for the pods | |
+| `RESULTS_DIR` | benchmarks/results | where results are written | |
+| `CONTINUE` | 0 | run-suite.sh: continue after a failed test | |
 
 ### NFS ([nfs/profile.env](nfs/profile.env))
-| Key | Default | Meaning |
-|---|---|---|
-| `NFS_SERVER`, `NFS_PATH` | – , `/` | the chart creates the NFS PV and mounts it with the options below |
-| `NFS_STORAGE_CLASS` | – | alternative: an existing NFS StorageClass (RWX). Mount options then come from the StorageClass |
-| `NFS_VERS` | 4.1 | `3`, `4.0`, `4.1`, `4.2` |
-| `NCONNECT` | 8 | TCP connections per mount (0 = off). Changing it restarts the daemons |
-| `RSIZE` / `WSIZE` | 1048576 | try 65536 for small random IO |
-| `NFS_EXTRA_OPTS` | hard | e.g. `hard,noatime,actimeo=0` |
-| `FILES`, `FILE_SIZE` | 8, 4g | dataset per daemon |
+| Key | Default | What it is | What changing it does |
+|---|---|---|---|
+| `NFS_SERVER`, `NFS_PATH` | – , `/` | the chart creates the NFS PV and mounts it | |
+| `NFS_STORAGE_CLASS` | – | alternative: an existing RWX StorageClass | Mount options then come from the StorageClass, not from the keys below |
+| `NFS_VERS` | 4.1 | `3`, `4.0`, `4.1`, `4.2` | v4.1+ limits requests in flight per node by session slots (Linux client default 64); v3 has no sessions |
+| `NCONNECT` | 8 | TCP connections per mount (0 = off) | More connections = more parallel requests per node; vendors report ~3× for 4k reads from 1 to 8–16. Restarts the daemons |
+| `RSIZE` / `WSIZE` | 1048576 | max bytes per NFS READ/WRITE | 65536 can help small random IO; 1M is best for throughput. Measure both |
+| `NFS_EXTRA_OPTS` | hard | extra mount options | e.g. `hard,noatime,actimeo=0` |
+| `PVC_SIZE` | 500Gi | nominal (NFS does not enforce it) | – |
 
 ### XFS ([xfs/profile.env](xfs/profile.env)) and raw block ([raw-block/profile.env](raw-block/profile.env))
-| Key | Default | Meaning |
-|---|---|---|
-| `STORAGE_CLASS` | – (required) | XFS: formats volumes as XFS (the runner checks `/data` really is XFS). Block: supports `volumeMode: Block` |
-| `PVC_SIZE` | 50Gi | per daemon (tests 01–07) / shared (08–09) |
-| `FILES`, `FILE_SIZE` | 8, 4g | XFS dataset. Must fit into `PVC_SIZE` |
-| `DEV_SIZE` | whole device | raw block: limit the tested range |
-| `ACCESS_MODE` | ReadWriteOnce | |
+| Key | Default | What it is | What changing it does |
+|---|---|---|---|
+| `STORAGE_CLASS` | – (required) | XFS: formats volumes as XFS (checked); block: `volumeMode: Block` | The system under test. A different class = new volumes |
+| `ACCESS_MODE` | ReadWriteOnce | | `ReadWriteMany` lets tests 08/09 spread over nodes (if the storage supports it) |
 
 ### S3 ([s3/profile.env](s3/profile.env))
-| Key | Default | Meaning |
+| Key | Default | What it is | What changing it does |
+|---|---|---|---|
+| `S3_ENDPOINT` | – (required) | comma separated endpoints | Several endpoints spread the threads over them (avoid one gateway as the limit) |
+| `S3_SECRET_NAME` | – | Secret with `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (recommended) | |
+| `S3_ACCESS_KEY` / `S3_SECRET_KEY` | – | alternative: the runner creates the Secret | Keys are never written to the results |
+| `S3_REGION` | – | | |
+| `BUCKET_PREFIX`, `BUCKETS` | elbencho, 4 | multi tests use `elbencho-1..4`, single `elbencho-single`, mixes `elbencho-mix` | More buckets spread the load if the system shards by bucket |
+| `OBJ_SIZE`, `OBJECTS` | 4k, 1000 | IOPS tests: object size, objects per thread | Bigger `OBJECTS` = dataset beyond the cache; bigger objects = fewer ops/s, more MiB/s |
+| `TPUT_OBJ_SIZE`, `TPUT_OBJECTS` | 256m, 4 | throughput tests: object size, objects per thread | Dataset = `PODS × THREADS × TPUT_OBJECTS × TPUT_OBJ_SIZE`; raise it for multi-TB runs |
+| `MIX_OBJECTS` | 20000 | objects of the mixed-size dataset (05–07) | |
+
+## Latency targets
+
+Every run compares its latency with the target of its protocol and prints `TARGET ... within the target` or
+`OVER the target`; test 17 stops there and reports the best step within it. Reads and writes have separate targets.
+
+| protocol | read avg / p99 | write avg / p99 | large-block tests (03, 04, 07) |
+|---|---|---|---|
+| raw block, XFS (NVMe/TCP class) | 2 / 5 ms | 2 / 10 ms | × 10 (`TPUT_LAT_FACTOR`) |
+| NFS | 2 / 5 ms | 5 / 15 ms | × 10 |
+| S3 | 30 / 90 ms | 30 / 90 ms | × 1 |
+
+Where the numbers come from (published figures; vendor numbers are best cases at their own load):
+- NVMe/TCP adds about 0.1 ms per 4k write over the network (Western Digital, TCP vs RoCE); 0.3–0.5 ms is typical
+  end to end, < 0.2 ms on tuned paths (simplyblock). Local NVMe with XFS: p99 ≈ 0.6 ms for 4k random writes.
+- Audited SPC-1 results of all-flash arrays: 0.26–0.96 ms average response time at 100% load. Vendor guidance for
+  databases on all-flash: ≤ 1 ms average.
+- All-flash NFS systems in SPECstorage 2020: 1.0–1.4 ms average response time at their peak load (mixed workloads
+  with metadata).
+
+The write targets are the "lenient" level: well above what a healthy array shows, so test 17 stops where the
+system is clearly overloaded rather than at the first sign of queueing. Tighten them for latency-critical
+applications, e.g. `LAT_WRITE_AVG_MAX=1 LAT_WRITE_P99_MAX=5`.
+
+## Datasets
+
+For nfs, xfs and raw block, one dataset per deployment is used by all tests:
+`total = max(TPUT_DATASET, EXPECTED_IOPS × 4k × 60 × IOPS_COVER_MIN)` = 4 TiB with the defaults, split between the
+daemons (layout multi) or one shared set (layout single). Volumes (`PVC_SIZE`) are sized to hold it.
+
+- **Throughput tests** read/write several TB, far beyond any controller cache.
+- **IOPS tests**: random 4k IO at `EXPECTED_IOPS` needs `IOPS_COVER_MIN` (20) minutes to go once through the
+  dataset, so blocks are not hit again within that time. After each IOPS test the runner prints the real time at
+  the measured rate, and warns with the needed `DATASET_SIZE` / `EXPECTED_IOPS` when it is shorter.
+- The first test of a deployment writes the dataset (`prepare`); later tests reuse it. It is written again only
+  when its size changes or a run needs more daemons than have data. In sweeps it is sized for the largest pod
+  count, so the steps share it.
+- S3 is not affected; its datasets are set with `OBJECTS`, `TPUT_OBJECTS`, `MIX_OBJECTS`.
+
+## Comparing storage systems
+
+`compare.sh` runs the same list of tests on two or more systems, one after the other, with the same load
+generators (default `PODS=auto`, `CPU=auto`), the same dataset size and the same latency targets:
+
+```bash
+./benchmarks/compare.sh raw-block TARGETS="arrayA=sc-array-a arrayB=sc-array-b"
+```
+The output looks like this (layout only, the numbers are made up):
+```
+COMPARISON (raw-block, STORAGE_CLASS): best result within the latency target per test (latencies in ms)
+test     system             ops/s     MiB/s   rd_avg   rd_p99   wr_avg   wr_p99 pods/thr/qd    verdict        vs arrayA
+max:01   arrayA            412000      1609        -        -     1.21     6.80 8/16/16        ok             -
+max:01   arrayB            498000      1945        -        -     1.65     8.90 8/16/32        ok             +21%
+...
+```
+
+| Key | Default | What it does |
 |---|---|---|
-| `S3_ENDPOINT` | – (required) | e.g. `http://minio.minio.svc:9000` |
-| `S3_SECRET_NAME` | – | Secret with `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (recommended) |
-| `S3_ACCESS_KEY` / `S3_SECRET_KEY` | – | alternative: the runner creates the Secret. Keys are never written to the results |
-| `S3_REGION` | – | |
-| `BUCKET_PREFIX`, `BUCKETS` | elbencho, 4 | multi tests: `elbencho-1..4`; single tests: `elbencho-single`; mixes: `elbencho-mix` |
-| `OBJ_SIZE`, `OBJECTS` | 4k, 1000 | IOPS tests: object size, objects per thread |
-| `TPUT_OBJ_SIZE`, `TPUT_OBJECTS` | 256m, 4 | throughput tests |
-| `MIX_OBJECTS` | 20000 | size of the mixed-size dataset (tests 05–07) |
-| `LAT_AVG_MAX` / `LAT_P99_MAX` | 30 / 90 | latency target of S3 runs in ms |
+| `TARGETS` | – (required) | `<label>=<value>` per system; the value goes into `COMPARE_VAR` |
+| `COMPARE_VAR` | `STORAGE_CLASS` (raw-block, xfs), `NFS_SERVER` (nfs), `S3_ENDPOINT` (s3) | the setting that differs between the systems |
+| `ARGS_<label>` | – | extra settings for one system only, e.g. `ARGS_b="NFS_PATH=/vol2"` |
+| `ITEMS` | `max:01 max:02 max:03 max:04` | `max:NN` = test 17 on test NN (best within the target); `NN` = one fixed run of test NN |
+
+- Every system gets its own deployment (`cmp-<label>-...`) and its own dataset on its own volumes. Before a
+  system runs, the pods of the others are scaled to 0, so they do not take CPU or network from it.
+- Each system writes its full dataset once (4 TiB by default), so plan time for two prepares.
+- Volumes are kept, so a second comparison reuses the datasets. Remove a system with
+  `./benchmarks/cleanup.sh raw-block RELEASE_PREFIX=cmp-<label>` (lower case).
+- The table and the raw rows are saved as `results/compare-<time>.txt` / `.tsv`; every system's steps are in
+  `results/sweep-<time>-<label>-<test>.txt`.
 
 ## Finding the maximum
 
@@ -201,12 +396,13 @@ column (busiest daemon, in % of its CPU request, or of the node's cores without 
 ./benchmarks/s3/17-find-max.sh S3_ENDPOINT=... S3_SECRET_NAME=s3-creds SWEEP_TEST=02   # read IOPS
 ./benchmarks/s3/17-find-max.sh S3_ENDPOINT=... S3_SECRET_NAME=s3-creds SWEEP_TEST=03   # write throughput
 ./benchmarks/s3/17-find-max.sh S3_ENDPOINT=... S3_SECRET_NAME=s3-creds SWEEP_TEST=04   # read throughput
-./benchmarks/nfs/17-find-max.sh NFS_SERVER=... NFS_PATH=/export SWEEP_TEST=02 LAT_P99_MAX=5
+./benchmarks/nfs/17-find-max.sh NFS_SERVER=... NFS_PATH=/export SWEEP_TEST=02
+./benchmarks/raw-block/17-find-max.sh STORAGE_CLASS=array-a SWEEP_TEST=01
 ```
 
 - It deploys a daemon on every node (`PODS=auto`, `CPU=auto`) and runs `SWEEP_TEST` with a growing load:
   `SWEEP_THREADS` for S3 (default `8 16 32 64 128 256`, throughput `2 … 64`), `SWEEP_IODEPTH` for the others.
-- It stops at the first step that misses the latency target (`over target`), that is `CLIENT-LIMITED`, or after two
+- It stops at the first step that misses the latency target of the protocol (`over target`, see "Latency targets"), that is `CLIENT-LIMITED`, or after two
   steps that gain less than `MIN_GAIN` % (3) over the best so far (saturated). `FIND_STOP=0` runs the whole ladder.
 - It prints every step and `BEST within target`: the best step that met the target, with its `PODS` and `THREADS`.
   The table is saved as `results/sweep-<time>.txt`. The same verdict column is printed by tests 12 and 13.
@@ -309,7 +505,8 @@ run two coordinated benchmarks at once.
 ## Results
 
 Each run writes `results/<protocol>/<NN-test>/<timestamp>/`:
-- `summary.txt`: the table printed at the end (IOPS, read IOPS, MiB/s, avg latency, percentiles)
+- `summary.txt`: the table printed at the end (IOPS, read IOPS, MiB/s, avg latency, percentiles, the `TARGET`
+  verdict and, for IOPS tests, how long the IO needs to go through the dataset)
 - `*.csv` / `*.txt`: elbencho result files for each phase (`prepare`, measured phases)
 - `console.log`: full output
 - `params.env` + `values.yaml`: exactly what was run, so you can repeat it
@@ -326,8 +523,8 @@ This is the right value for aggregate IOPS and throughput.
 These come from elbencho's own examples, VAST Data's elbencho guides and the NFS tuning guides of Azure NetApp
 Files and Google Cloud:
 
-- **Bypass the client cache.** All file and block tests use `--direct`. Server-side caches still count, so make the
-  dataset (`PODS × FILES × FILE_SIZE`) clearly larger than the storage's cache if you want media performance.
+- **Bypass the client cache.** All file and block tests use `--direct`. Server-side caches still count, so the
+  dataset is several TB by default (see "Datasets"); check it against the storage cache with `STORAGE_CACHE`.
 - **IOPS need concurrency:** threads × iodepth per pod × pods (S3 IOPS: threads × pods). Raise it until IOPS stop
   growing while latency keeps rising. That is the saturation point. Test 17 automates the search.
 - **Throughput:** large sequential blocks (1m–4m) with fewer threads. For S3, use large objects with 16m+ parts.
