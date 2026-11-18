@@ -148,12 +148,12 @@ inference_test() {
       local d=(); [ $S3 = 0 ] && [ "$LOAD_DIRECT" = 1 ] && d=(--direct)
       if need_prepare ai-model "$MODEL_SIZE/$MODEL_SHARDS"; then
         log "writing the model once ($MODEL_SIZE in $MODEL_SHARDS shards)"
-        eb prepare-model 0 ELBENCHO_HOSTS --numhosts 1 -w -t "$LOAD_THREADS" -s "$shard" -b 16m "${d[@]}" "$model"
+        eb prepare-model 0 ELBENCHO_HOSTS --numhosts 1 -w -t "$LOAD_THREADS" -s "$shard" -b 16m ${d[@]+"${d[@]}"} "$model"
         ds_set ai-model "$MODEL_SIZE/$MODEL_SHARDS"
       fi
       log "model load: $PODS replicas read the full model ($MODEL_SIZE) at the same time"
       local x=(); [ $S3 = 1 ] && x=(--s3fastget)
-      eb model-load 1 ELBENCHO_HOSTS --nosvcshare -r -t "$LOAD_THREADS" -s "$shard" -b "$LOAD_BS" "${d[@]}" "${x[@]}" "$model" ;;
+      eb model-load 1 ELBENCHO_HOSTS --nosvcshare -r -t "$LOAD_THREADS" -s "$shard" -b "$LOAD_BS" ${d[@]+"${d[@]}"} ${x[@]+"${x[@]}"} "$model" ;;
     lookup)
       if [ $S3 = 1 ]; then
         local l=(-n 1 -N "$LOOKUP_OBJECTS" -s "$LOOKUP_OBJ_SIZE" -b "$LOOKUP_OBJ_SIZE" -t "$LOOKUP_THREADS" --s3objprefix index/)

@@ -23,7 +23,7 @@ prepare() {
   local sig="dev=${DEV_SIZE:-full}"
   if need_prepare_pods dataset "$sig"; then
     log "preconditioning: sequential write of the ${DEV_SIZE:-whole} device on every daemon"
-    eb prepare 0 ELBENCHO_HOSTS -w -t "$PREP_THREADS" -b 1m --direct "${SIZE[@]}" $SHARE "$DEV"
+    eb prepare 0 ELBENCHO_HOSTS -w -t "$PREP_THREADS" -b 1m --direct ${SIZE[@]+"${SIZE[@]}"} $SHARE "$DEV"
     ds_set dataset "$sig,pods=$([ "$LAYOUT" = multi ] && echo "$PODS" || echo 0)"
   else
     log "device already preconditioned ($sig) - skipping (PREPARE=always to force)"
@@ -31,7 +31,7 @@ prepare() {
 }
 
 run_test() {
-  local io=(-t "$THREADS" --iodepth "$IODEPTH" --direct "${SIZE[@]}" $SHARE)
+  local io=(-t "$THREADS" --iodepth "$IODEPTH" --direct ${SIZE[@]+"${SIZE[@]}"} $SHARE)
   case "$TEST" in
     01|09) prepare; eb "$TNAME" 1 ELBENCHO_HOSTS -w --rand -b "$BS" "${io[@]}" "${TIMED[@]}" "$DEV" ;;
     02|08) prepare; eb "$TNAME" 1 ELBENCHO_HOSTS -r --rand -b "$BS" "${io[@]}" "${TIMED[@]}" "$DEV" ;;

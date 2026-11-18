@@ -21,26 +21,28 @@
 # example: two distributed block arrays, everything else at the defaults
 #   ./compare.sh raw-block TARGETS="arrayA=sc-array-a arrayB=sc-array-b"
 set -uo pipefail
+# Arrays that can be empty are expanded as ${a[@]+"${a[@]}"}: with set -u, bash < 4.4 (RHEL/CentOS 7: 4.2)
+# treats a plain "${a[@]}" of an empty array as an unbound variable.
 D=$(cd "$(dirname "$0")" && pwd)
 P=${1:?usage: compare.sh <raw-block|xfs|nfs|s3> TARGETS=\"a=<value> b=<value>\" [ITEMS=...] [KEY=VALUE ...]}; shift
 [ -f "$D/$P/profile.env" ] || { echo "unknown protocol '$P'" >&2; exit 1; }
-TARGETS=""; ITEMS="max:01 max:02 max:03 max:04"; COMPARE_VAR=""; args=(); declare -A EXTRA
+TARGETS=""; ITEMS="max:01 max:02 max:03 max:04"; COMPARE_VAR=""; args=()
 for kv in "$@"; do
   case $kv in
     TARGETS=*) TARGETS=${kv#*=} ;;
     ITEMS=*) ITEMS=${kv#*=} ;;
     COMPARE_VAR=*) COMPARE_VAR=${kv#*=} ;;
-    ARGS_*=*) k=${kv%%=*}; EXTRA[${k#ARGS_}]=${kv#*=} ;;
+    ARGS_*=*) k=${kv%%=*}; printf -v "CMP_ARGS_${k#ARGS_}" '%s' "${kv#*=}" ;;
     *=*) args+=("$kv") ;;
     *) echo "arguments must be KEY=VALUE, got '$kv'" >&2; exit 1 ;;
   esac
 done
 [ -n "$COMPARE_VAR" ] || case $P in raw-block|xfs) COMPARE_VAR=STORAGE_CLASS ;; nfs) COMPARE_VAR=NFS_SERVER ;; s3) COMPARE_VAR=S3_ENDPOINT ;; esac
 [ -n "$TARGETS" ] || { echo "set TARGETS=\"<label>=<$COMPARE_VAR> <label>=<$COMPARE_VAR>\"" >&2; exit 1; }
-for kv in "${args[@]}"; do [[ $kv == PODS=* ]] && HAVE_PODS=1; done
+for kv in ${args[@]+"${args[@]}"}; do [[ $kv == PODS=* ]] && HAVE_PODS=1; done
 [ -n "${HAVE_PODS:-}" ] || args+=(PODS=auto)
 : "${NAMESPACE:=elbencho-bench}"; : "${RESULTS_DIR:=$D/results}"
-for kv in "${args[@]}"; do case $kv in NAMESPACE=*) NAMESPACE=${kv#*=} ;; RESULTS_DIR=*) RESULTS_DIR=${kv#*=} ;; esac; done
+for kv in ${args[@]+"${args[@]}"}; do case $kv in NAMESPACE=*) NAMESPACE=${kv#*=} ;; RESULTS_DIR=*) RESULTS_DIR=${kv#*=} ;; esac; done
 case $P in raw-block) PS=blk ;; *) PS=$P ;; esac
 labels=(); for t in $TARGETS; do
   l=${t%%=*}; [[ $l =~ ^[A-Za-z0-9]+$ ]] && [ "$t" != "$l" ] || { echo "bad TARGETS entry '$t' (want <label>=<value>)" >&2; exit 1; }
@@ -62,17 +64,17 @@ for t in $TARGETS; do
   l=${t%%=*}; v=${t#*=}
   scale_down "$l"
   # shellcheck disable=SC2206
-  ex=(${EXTRA[$l]:-})
+  xv="CMP_ARGS_$l"; ex=(${!xv:-})
   for it in $ITEMS; do
     tn=${it#max:}; tag="$ID-$l-$tn"
     echo; echo "================= $l ($COMPARE_VAR=$v): $([ "$it" = "$tn" ] && echo "test $tn" || echo "find-max on test $tn") ================="
-    common=("${args[@]}" "$COMPARE_VAR=$v" "RELEASE_PREFIX=$(printf 'cmp-%s' "$l" | tr 'A-Z' 'a-z')" "SWEEP_TAG=$l-$tn" "SWEEP_TEST=$tn" "RESULTS_DIR=$RESULTS_DIR")
+    common=(${args[@]+"${args[@]}"} "$COMPARE_VAR=$v" "RELEASE_PREFIX=$(printf 'cmp-%s' "$l" | tr 'A-Z' 'a-z')" "SWEEP_TAG=$l-$tn" "SWEEP_TEST=$tn" "RESULTS_DIR=$RESULTS_DIR")
     if [ "$it" = "$tn" ]; then
-      pods=auto; for kv in "${args[@]}"; do [[ $kv == PODS=* ]] && pods=${kv#PODS=}; done
-      one=(); for kv in "${common[@]}" "${ex[@]}"; do [[ $kv == SWEEP_[A-Z]*=* && $kv != SWEEP_TAG=* && $kv != SWEEP_TEST=* ]] || one+=("$kv"); done
-      "$D/lib/run.sh" "$P" 12 "${one[@]}" "SWEEP_PODS=$pods" || echo "($l: test $tn failed)"   # one step: no ladder
+      pods=auto; for kv in ${args[@]+"${args[@]}"}; do [[ $kv == PODS=* ]] && pods=${kv#PODS=}; done
+      one=(); for kv in ${common[@]+"${common[@]}"} ${ex[@]+"${ex[@]}"}; do [[ $kv == SWEEP_[A-Z]*=* && $kv != SWEEP_TAG=* && $kv != SWEEP_TEST=* ]] || one+=("$kv"); done
+      "$D/lib/run.sh" "$P" 12 ${one[@]+"${one[@]}"} "SWEEP_PODS=$pods" || echo "($l: test $tn failed)"   # one step: no ladder
     else
-      "$D/lib/run.sh" "$P" 17 "${common[@]}" "${ex[@]}" || echo "($l: find-max on $tn failed)"
+      "$D/lib/run.sh" "$P" 17 ${common[@]+"${common[@]}"} ${ex[@]+"${ex[@]}"} || echo "($l: find-max on $tn failed)"
     fi
     f=$(ls -t "$RESULTS_DIR"/sweep-*-"$l-$tn".tsv 2>/dev/null | head -1)
     m=2; case $tn in 03|04) m=3 ;; esac
