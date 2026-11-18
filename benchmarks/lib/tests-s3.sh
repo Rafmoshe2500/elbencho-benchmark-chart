@@ -117,6 +117,15 @@ run_test() {
            eb "$TNAME" 1 ELBENCHO_HOSTS -r --s3fastget -t "$THREADS" --iodepth "$IODEPTH" -n 1 -N "$OBJECTS" -s "$OBJ_SIZE" -b "$BS" --s3objprefix tput/ "${TIMED[@]}" "$BUCKETS_PATH" ;;
     05|06|07) mix_test ;;
     10)    local l=(-t 1 -n 1 -N 1000 -s "$BS" -b "$BS" --s3objprefix lat/)
+           # The GET phase reads all 1000 objects of every daemon. The timed PUT phase may stop before it has
+           # written them all (a slow S3 needs > DURATION for 1000 PUTs), so write them once beforehand.
+           local sig="$BUCKETS_PATH,obj=$BS"
+           local cur; cur=$(ds_get lat)   # one thread per daemon here, so the marker counts daemons
+           if [ "$PREPARE" = always ] || { [ "$PREPARE" != never ] && ! { [ "${cur%,ranks=*}" = "$sig" ] && [ "${cur##*,ranks=}" -ge "$PODS" ] 2>/dev/null; }; }; then
+             log "preparing $((1000 * PODS)) objects of $BS for the GET phase"
+             eb prepare 0 ELBENCHO_HOSTS -w -t 1 -n 1 -N 1000 -s "$BS" -b "$BS" --s3objprefix lat/ "$BUCKETS_PATH"
+             ds_set lat "$sig,ranks=$PODS"
+           fi
            eb lat-put 1 ELBENCHO_HOSTS -w "${l[@]}" "${TIMED[@]}" "$BUCKETS_PATH"
            eb lat-get 1 ELBENCHO_HOSTS -r --s3fastget "${l[@]}" "${TIMED[@]}" "$BUCKETS_PATH" ;;
     16)    # random byte-range GETs inside large objects (analytics engines reading Parquet/ORC)
