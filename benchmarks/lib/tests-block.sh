@@ -5,7 +5,6 @@
 #   layout single: all daemons (same node) share ONE device; the device range is split between them.
 # WARNING: these tests overwrite the whole device.
 
-: "${DEV_SIZE:=}"           # optional: limit the tested range, e.g. 100g
 : "${PREP_THREADS:=8}"
 
 DEV=/dev/elbencho
@@ -14,9 +13,9 @@ dataset_bytes() {   # the tested range of every device
   local one; one=$(to_bytes "${DEV_SIZE:-$PVC_SIZE}")
   if [ "$LAYOUT" = multi ]; then echo $(( PODS * one )); else echo "$one"; fi
 }
-dataset_hint() { echo "Raise PVC_SIZE (or DEV_SIZE)$( [ "$LAYOUT" = multi ] && echo ' / PODS')."; }
+dataset_hint() { echo "Raise DATASET_SIZE."; }
 SHARE=""; [ "$LAYOUT" = multi ] && SHARE="--nosvcshare"
-SIZE=(); [ -n "$DEV_SIZE" ] && SIZE=(-s "$DEV_SIZE")   # DEV_SIZE is set by size_dataset (run.sh) unless given
+SIZE=(); [ -n "$DEV_SIZE" ] && SIZE=(-s "$DEV_SIZE")   # DEV_SIZE is set by size_dataset (run.sh) from DATASET_SIZE
 TIMED=(--timelimit "$DURATION" --infloop)
 
 prepare() {

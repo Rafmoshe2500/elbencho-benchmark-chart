@@ -5,19 +5,19 @@
 #                  every daemon works on its full own dataset.
 #   layout single: all daemons share ONE volume / directory; the dataset is split between them.
 
-: "${FILES:=8}"               # FILE_SIZE is set by size_dataset (run.sh) unless given
+# FILES and FILE_SIZE are set by size_dataset (run.sh) from DATASET_SIZE
 : "${PREP_THREADS:=8}"
 : "${META_DIRS:=10}"        # test 11: dirs per thread
 : "${META_FILES:=1000}"     # test 11: files per dir
 
-PATHS="/data/f[1-$FILES]"
+if [ "$FILES" = 1 ]; then PATHS=/data/f1; else PATHS="/data/f[1-$FILES]"; fi
 
 dataset_bytes() {   # what the measured phase works on (metadata test: not relevant)
   [ "$TEST" = 11 ] && { echo 0; return; }
   local one=$(( FILES * $(to_bytes "$FILE_SIZE") ))
   if [ "$LAYOUT" = multi ]; then echo $(( PODS * one )); else echo "$one"; fi
 }
-dataset_hint() { echo "Raise FILE_SIZE / FILES$( [ "$LAYOUT" = multi ] && echo ' / PODS')$( [ "$PROTO" = xfs ] && echo ' (and PVC_SIZE)')."; }
+dataset_hint() { echo "Raise DATASET_SIZE."; }
 SHARE=""; [ "$LAYOUT" = multi ] && SHARE="--nosvcshare"
 TIMED=(--timelimit "$DURATION" --infloop)
 

@@ -54,14 +54,16 @@ run_rows() {
       printf "%s\t%.0f\t%.0f\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", g, ops[g], mib[g], ms(wa,g), ms(wp,g), ms(ra,g), ms(rp,g),
         (cpu[g]==""?"-":cpu[g]), pods[g], thr[g], qd[g], bs[g], (nc[g]==""?"-":nc[g]), (ds[g]==""?"-":ds[g]"G") } }' "$RESULTS_DIR/summary.csv"
 }
-# Latency targets of a test in ms: "rd_avg rd_p99 wr_avg wr_p99" ("-" = none). Large-block tests (throughput
-# 03/04 and the 256k-1m mix 07) get TPUT_LAT_FACTOR x the targets: one 1 MiB IO takes longer than a 4k IO.
+# Latency targets of a test in ms: "rd_avg rd_p99 wr_avg wr_p99" ("-" = none), from LAT_READ / LAT_WRITE
+# ("avg/p99", e.g. 2/5; "-/5" = only p99, "2" = only avg, empty = no target). Large-block tests (throughput 03/04
+# and the 256k-1m mix 07) get TPUT_LAT_FACTOR x the targets: one 1 MiB IO takes longer than a 4k IO.
 targets() {
   local f=1; case "$1" in 03|04|07) f=${TPUT_LAT_FACTOR:-1} ;; esac
-  awk -v f="$f" -v a="${LAT_READ_AVG_MAX:-}" -v b="${LAT_READ_P99_MAX:-}" -v c="${LAT_WRITE_AVG_MAX:-}" -v d="${LAT_WRITE_P99_MAX:-}" '
-    function t(v) { return (v=="") ? "-" : v*f } BEGIN { print t(a), t(b), t(c), t(d) }'
+  awk -v f="$f" -v r="${LAT_READ:-}" -v w="${LAT_WRITE:-}" '
+    function t(v) { return (v=="" || v=="-") ? "-" : v*f }
+    BEGIN { split(r, a, "/"); split(w, b, "/"); print t(a[1]), t(a[2]), t(b[1]), t(b[2]) }'
 }
-has_targets() { [ -n "${LAT_READ_AVG_MAX:-}${LAT_READ_P99_MAX:-}${LAT_WRITE_AVG_MAX:-}${LAT_WRITE_P99_MAX:-}" ]; }
+has_targets() { [ -n "${LAT_READ:-}${LAT_WRITE:-}" ]; }
 # verdict <test> <wr_avg> <wr_p99> <rd_avg> <rd_p99> <client_cpu_pct>
 #   client = the load generators were the limit, slo = a latency target was missed, ok
 verdict() {
@@ -74,7 +76,7 @@ verdict() {
     else print "ok" }'
 }
 slo_text() {   # slo_text <test>
-  has_targets || { echo "no latency target set (LAT_READ_* / LAT_WRITE_* / LAT_AVG_MAX / LAT_P99_MAX, in ms)"; return; }
+  has_targets || { echo "no latency target set (LAT_READ / LAT_WRITE = avg/p99 in ms)"; return; }
   # shellcheck disable=SC2046
   set -- $(targets "$1") "$1"
   local r="" w=""
@@ -115,14 +117,12 @@ command -v helm >/dev/null || die "helm not found"
 : "${MEMORY:=}"                # memory request+limit per daemon, e.g. "16Gi"
 : "${CLIENT_CPU:=1}"           # 1 = measure the CPU the daemons used in every measured phase (cgroup counters)
 : "${CLIENT_CPU_MAX:=80}"      # busiest daemon above this % of its CPU -> the result is client-limited
-# Latency targets in ms (average / p99) for the verdict of every run and for the search of test 17:
-#   LAT_READ_AVG_MAX LAT_READ_P99_MAX LAT_WRITE_AVG_MAX LAT_WRITE_P99_MAX (LAT_AVG_MAX / LAT_P99_MAX = both).
-#   Defaults per protocol in profile.env; TPUT_LAT_FACTOR (10) multiplies them for tests 03 04 07.
-# Dataset of nfs / xfs / raw-block (one dataset for all tests of a deployment, see size_dataset):
-: "${TPUT_DATASET:=4t}"        # throughput tests read/write at least this much (total of all pods)
-: "${IOPS_COVER_MIN:=20}"      # IOPS tests: minutes until the random IO has gone once through the dataset ...
-: "${EXPECTED_IOPS:=500000}"   # ... at this rate of 4k IOs (all pods together)
-: "${DATASET_SIZE:=}"          # explicit total size; default max(TPUT_DATASET, EXPECTED_IOPS x 4k x 60 x IOPS_COVER_MIN)
+# Latency targets in ms, "avg/p99", for the verdict of every run and where test 17 stops:
+#   LAT_READ  LAT_WRITE   (defaults per protocol in profile.env; TPUT_LAT_FACTOR multiplies them for 03 04 07)
+# Dataset (all protocols): DATASET_SIZE = total size of all pods together. The number of files / objects per
+#   thread follows from it and the file / object size (FILE_SIZE, OBJ_SIZE). Defaults in profile.env / below.
+: "${IOPS_COVER_MIN:=20}"      # IOPS tests: warn when the random IO goes through the dataset faster than this (min)
+: "${DATASET_SIZE:=}"          # total dataset; default: nfs/xfs/raw-block 4t, S3 16g (IOPS, mixes) / 4t (throughput)
 : "${PREPARE:=auto}"           # dataset creation before read/mixed tests: auto | always | never
 : "${KEEP:=1}"                 # 1 = keep the deployment for the next test (see cleanup.sh)
 : "${LIVE:=1}"                 # 1 = live progress lines during the run
@@ -148,10 +148,15 @@ command -v helm >/dev/null || die "helm not found"
 
 # shellcheck disable=SC1090
 source "$BENCH_DIR/$PROTO/profile.env"
-# Latency targets (ms). LAT_AVG_MAX / LAT_P99_MAX set both directions; LAT_READ_* / LAT_WRITE_* one of them.
-# The profile may set per-direction defaults; an empty value (e.g. LAT_WRITE_P99_MAX=) switches a target off.
-: "${LAT_READ_AVG_MAX=${LAT_AVG_MAX-}}";  : "${LAT_READ_P99_MAX=${LAT_P99_MAX-}}"
-: "${LAT_WRITE_AVG_MAX=${LAT_AVG_MAX-}}"; : "${LAT_WRITE_P99_MAX=${LAT_P99_MAX-}}"
+for v in LAT_AVG_MAX LAT_P99_MAX LAT_READ_AVG_MAX LAT_READ_P99_MAX LAT_WRITE_AVG_MAX LAT_WRITE_P99_MAX \
+         TPUT_DATASET EXPECTED_IOPS TPUT_OBJ_SIZE TPUT_OBJECTS RANGE_OBJ_SIZE RANGE_OBJECTS OBJECTS MIX_OBJECTS \
+         SWEEP_FILE_SIZE SWEEP_DEV_SIZE SWEEP_OBJECTS; do
+  [ -z "${!v+x}" ] || die "$v was replaced: latency targets are LAT_READ=avg/p99 and LAT_WRITE=avg/p99 (e.g. LAT_WRITE=2/10); datasets are DATASET_SIZE (+ FILE_SIZE / OBJ_SIZE), sweeps SWEEP_DATASET_SIZE. See benchmarks/README.md"
+done
+: "${LAT_READ=}"; : "${LAT_WRITE=}"
+for v in LAT_READ LAT_WRITE; do
+  [[ ${!v} =~ ^(([0-9.]+|-)(/([0-9.]+|-))?)?$ ]] || die "$v must be avg/p99 in ms, e.g. 2/5 (or -/5 for p99 only), got '${!v}'"
+done
 : "${TPUT_LAT_FACTOR:=10}"
 
 case "$PROTO" in
@@ -169,7 +174,8 @@ case "$TEST" in
   07) TNAME=mix70-256k-1m ;;
   08) TNAME=single-target-read-iops ;;  09) TNAME=single-target-write-iops ;;
   10) TNAME=latency-qd1 ;;         11) TNAME=metadata ;;
-  12) TNAME=scaling-sweep ;;       13) TNAME=iodepth-sweep ;;
+  12) TNAME=scaling-sweep ;;
+  13) die "test 13 is now part of test 12: ./12-scaling-sweep.sh SWEEP_PODS=<pods> SWEEP_IODEPTH=\"1 2 4 8 16 32 64 128\"" ;;
   14) TNAME=ai-training ;;         15) TNAME=ai-inference ;;
   16) TNAME=range-read ;;
   17) TNAME=find-max ;;
@@ -178,7 +184,6 @@ case "$TEST" in
 esac
 case "$TEST" in
   11) [ "$FAMILY" != block ] || die "test 11 (metadata) needs a filesystem - not available for raw-block" ;;
-  13) [ "$FAMILY" != s3 ] || die "test 13 (iodepth sweep) is for nfs / xfs / raw-block" ;;
   14|15) [ "$PROTO" = nfs ] || [ "$PROTO" = s3 ] || die "tests 14/15 (AI) are for nfs and s3 (shared datasets)" ;;
   16) [ "$FAMILY" = s3 ] || die "test 16 (range reads in large objects) is for s3" ;;
 esac
@@ -200,24 +205,23 @@ esac
 # "block" of the IOPS tests is the object size; throughput tests use 16 MiB multipart parts.
 if [ "$FAMILY" = s3 ]; then
   case "$TEST" in
-    01|02|08|09) THREADS=${USER_THREADS:-32}; IODEPTH=1; OBJ_SIZE=${USER_BS:-$OBJ_SIZE}; BS=$OBJ_SIZE   # BS = OBJ_SIZE here
+    01|02|08|09) THREADS=${USER_THREADS:-32}; IODEPTH=1; OBJ_SIZE=${USER_BS:-${OBJ_SIZE:-4k}}; BS=$OBJ_SIZE   # BS = OBJ_SIZE here
                  # verified with elbencho 3.3-3: one PUT/GET per object is always synchronous, --iodepth changes nothing
                  [ "${USER_IODEPTH:-1}" = 1 ] || warn "IODEPTH has no effect on S3 whole-object requests (concurrency = PODS x THREADS) - using IODEPTH=1; raise THREADS instead" ;;
-    03|04)       THREADS=${USER_THREADS:-16}; IODEPTH=${USER_IODEPTH:-1}; BS=${USER_BS:-16m} ;;
+    03|04)       THREADS=${USER_THREADS:-16}; IODEPTH=${USER_IODEPTH:-1}; BS=${USER_BS:-16m}; : "${OBJ_SIZE:=256m}" ;;
     05|06|07)    THREADS=${USER_THREADS:-20} ;;
-    16)          THREADS=${USER_THREADS:-16}; IODEPTH=${USER_IODEPTH:-1} ;;
+    16)          THREADS=${USER_THREADS:-16}; IODEPTH=${USER_IODEPTH:-1}; : "${OBJ_SIZE:=256m}" ;;
   esac
 fi
 : "${DURATION:=60}"            # seconds per timed phase
 
-# --------------------------------------------------- sweeps (12, 13, 17) ---
-# 12: pods (and NCONNECT / THREADS / IODEPTH / dataset size) sweep, 13: iodepth sweep at a fixed pod count,
+# ------------------------------------------------------- sweeps (12, 17) ---
+# 12: sweep over pods / threads / iodepth / nconnect / dataset size (any combination, every step runs),
 # 17: find-max = load ladder (S3: THREADS, files/block: IODEPTH) that stops at the latency target,
 #     when the result stops growing, or when the load generators themselves are the limit.
-if [ "$TEST" = 12 ] || [ "$TEST" = 13 ] || [ "$TEST" = 17 ]; then
+if [ "$TEST" = 12 ] || [ "$TEST" = 17 ]; then
   : "${SWEEP_TEST:=02}"; : "${SWEEP_THREADS:=}"
   case "$TEST" in
-    13) : "${SWEEP_PODS:=$PODS}"; : "${SWEEP_IODEPTH:=1 2 4 8 16 32 64 128}" ;;
     12) : "${SWEEP_PODS:=1 2 4 8}"; : "${SWEEP_IODEPTH:=}" ;;
     17) : "${SWEEP_PODS:=$PODS}"; : "${FIND_STOP:=1}"
         if [ -z "$SWEEP_THREADS${SWEEP_IODEPTH:-}" ]; then
@@ -233,11 +237,7 @@ if [ "$TEST" = 12 ] || [ "$TEST" = 13 ] || [ "$TEST" = 17 ]; then
   : "${MIN_GAIN:=3}"             # a step that gains less than this % over the best so far counts as flat
   : "${SWEEP_NCONNECT:=}"        # nfs only, e.g. "1 4 8 16"
   case "$SWEEP_TEST" in 03|04) : "${SWEEP_METRIC:=mibs}" ;; *) : "${SWEEP_METRIC:=ops}" ;; esac
-  # dataset size (find where the storage cache ends): FILE_SIZE (nfs/xfs), DEV_SIZE (raw-block), OBJECTS (s3)
-  SWEEP_SIZE_VAR=""; SWEEP_SIZES=""
-  for v in FILE_SIZE DEV_SIZE OBJECTS; do
-    sv="SWEEP_$v"; if [ -n "${!sv:-}" ]; then SWEEP_SIZE_VAR=$v; SWEEP_SIZES=${!sv}; fi
-  done
+  : "${SWEEP_DATASET_SIZE:=}"    # total dataset sizes, e.g. "100g 400g 1600g": where the storage cache ends
   case "$SWEEP_TEST" in 12|13|14|15|17) die "SWEEP_TEST must be one of 01..11, 16" ;; esac
   [ -z "$SWEEP_IODEPTH" ] || [ "$SWEEP_TEST" != 10 ] || die "test 10 is fixed at QD1 - sweep another test"
   SWEEP_ID=sweep-$(date +%Y%m%d-%H%M%S)${SWEEP_TAG:+-$SWEEP_TAG}
@@ -247,7 +247,8 @@ if [ "$TEST" = 12 ] || [ "$TEST" = 13 ] || [ "$TEST" = 17 ]; then
     DATASET_PODS=$(printf '%s\n' $SWEEP_PODS | grep -E '^[0-9]+$' | sort -n | tail -1 || true)
     [ -n "$DATASET_PODS" ] && [ "$(printf '%s\n' $SWEEP_PODS | sort -u | wc -l)" -gt 1 ] && export DATASET_PODS || DATASET_PODS=""
   fi
-  if [ "$FAMILY" = s3 ] && [ -n "$SWEEP_THREADS" ] && [[ $SWEEP_TEST == 02 || $SWEEP_TEST == 08 ]]; then
+  # S3 read tests: prepare once, for the highest thread count of the ladder (fewer threads read a part of it)
+  if [ "$FAMILY" = s3 ] && [ -n "$SWEEP_THREADS" ] && [[ $SWEEP_TEST =~ ^(02|04|08|16)$ ]]; then
     PREP_MIN_THREADS=$(printf '%s\n' $SWEEP_THREADS | sort -n | tail -1); export PREP_MIN_THREADS
   fi
   mkdir -p "$RESULTS_DIR"
@@ -256,7 +257,7 @@ if [ "$TEST" = 12 ] || [ "$TEST" = 13 ] || [ "$TEST" = 17 ]; then
   prev_dir=""; why=""
   for p in $SWEEP_PODS; do
     for n in ${SWEEP_NCONNECT:-_}; do
-      for z in ${SWEEP_SIZES:-_}; do
+      for z in ${SWEEP_DATASET_SIZE:-_}; do
         best=0; flat=0
         for t in ${SWEEP_THREADS:-_}; do
           for q in ${SWEEP_IODEPTH:-_}; do
@@ -264,7 +265,7 @@ if [ "$TEST" = 12 ] || [ "$TEST" = 13 ] || [ "$TEST" = 17 ]; then
             [ "$n" != _ ] && extra+=(NCONNECT="$n")
             [ "$t" != _ ] && extra+=(THREADS="$t")
             [ "$q" != _ ] && extra+=(IODEPTH="$q")
-            [ "$z" != _ ] && extra+=("$SWEEP_SIZE_VAR=$z" CACHE_CHECK=warn)
+            [ "$z" != _ ] && extra+=("DATASET_SIZE=$z" CACHE_CHECK=warn)
             log "sweep: test $SWEEP_TEST with ${extra[*]}"
             rc=0; "$0" "$PROTO" "$SWEEP_TEST" "${extra[@]}" || rc=$?
             dir=$(last_dir || true)
@@ -391,52 +392,64 @@ resolve_auto() {
 }
 resolve_auto
 
-# ----------------------------------------------- dataset size (nfs/xfs/block) ---
-# ONE dataset per deployment, used by all tests (01-10), so that switching tests does not prepare again:
-#   total = DATASET_SIZE, or the larger of TPUT_DATASET (throughput: several TB) and the size that 4k random IO
-#   at EXPECTED_IOPS needs to go through only once in IOPS_COVER_MIN minutes (no block hit twice before that).
-# It is split over the daemons (layout multi; DATASET_PODS = the largest pod count of a sweep) or is the one
-# shared target (layout single). Explicit FILE_SIZE (nfs/xfs) or DEV_SIZE (raw-block) win, per daemon.
-# xfs / raw-block volumes (PVC_SIZE) are sized to hold it, unless PVC_SIZE is given.
+# ------------------------------------------------------------ dataset size ---
+# DATASET_SIZE is the total of all daemons. The runner derives everything else:
+#   nfs / xfs : FILES = size per daemon / FILE_SIZE (default 64g; smaller datasets get one smaller file)
+#   raw block : DEV_SIZE = size per daemon (the tested range of every device)
+#   s3        : objects per thread = DATASET_SIZE / (OBJ_SIZE x daemons x threads); mixes: DATASET_SIZE / avg size
+# nfs/xfs/raw-block keep ONE dataset per deployment for all tests, so switching tests does not prepare again.
+# Layout multi splits it over the daemons (DATASET_PODS = the largest pod count of a sweep), layout single is one
+# shared set. xfs / raw-block volumes (PVC_SIZE) are sized to hold it, unless PVC_SIZE is given.
 size_dataset() {
-  [ "$FAMILY" != s3 ] || return 0
-  local units=1 total iops pu cap gib=1073741824 mib=1048576
-  [ "$LAYOUT" = multi ] && units=${DATASET_PODS:-$PODS}
-  if [ -n "$DATASET_SIZE" ]; then total=$(to_bytes "$DATASET_SIZE")
-  else
-    total=$(to_bytes "$TPUT_DATASET"); iops=$(( EXPECTED_IOPS * 4096 * 60 * IOPS_COVER_MIN ))
-    [ "$iops" -gt "$total" ] && total=$iops
+  local units=1 total pu cap gib=1073741824 mib=1048576
+  if [ "$FAMILY" = s3 ]; then
+    local pt=${THREADS:-1} ob
+    [ "${PREP_MIN_THREADS:-0}" -gt "$pt" ] 2>/dev/null && pt=$PREP_MIN_THREADS
+    case "$TEST" in
+      01|02|08|09|05|06|07) : "${DATASET_SIZE:=16g}" ;;
+      03|04|16)             : "${DATASET_SIZE:=4t}" ;;
+      *) return 0 ;;
+    esac
+    total=$(to_bytes "$DATASET_SIZE")
+    if [[ $TEST =~ ^0[5-7]$ ]]; then
+      MIX_OBJECTS=$(( total / $(mix_avg "$BS_MIX") )); [ "$MIX_OBJECTS" -ge 100 ] || MIX_OBJECTS=100
+      log "dataset: $(hr "$total") = $MIX_OBJECTS objects of $BS_MIX"
+    else
+      ob=$(to_bytes "$OBJ_SIZE"); OBJECTS=$(( total / ob / (PODS * pt) )); [ "$OBJECTS" -ge 1 ] || OBJECTS=1
+      log "dataset: $(hr "$total") = $OBJECTS objects of $OBJ_SIZE per thread x $((PODS * pt)) threads$([ "$pt" != "$THREADS" ] && echo " (prepared for the largest step, THREADS=$pt)")"
+    fi
+    return 0
   fi
+  : "${DATASET_SIZE:=4t}"
+  [ "$LAYOUT" = multi ] && units=${DATASET_PODS:-$PODS}
+  total=$(to_bytes "$DATASET_SIZE")
   pu=$(( total / units / mib * mib ))
   if [ "$FAMILY" = file ]; then
-    if [ -z "${FILE_SIZE:-}" ]; then
-      if [ "$PROTO" = xfs ] && [ -n "${PVC_SIZE:-}" ]; then
-        cap=$(( $(to_bytes "$PVC_SIZE") * 90 / 100 / mib * mib ))
-        [ "$pu" -gt "$cap" ] && { warn "PVC_SIZE=$PVC_SIZE holds only $(hr "$cap") per daemon - the dataset is smaller than wanted ($(hr "$pu"))"; pu=$cap; }
-      fi
-      FILE_SIZE="$(( pu / FILES / mib ))m"
+    if [ "$PROTO" = xfs ] && [ -n "${PVC_SIZE:-}" ]; then
+      cap=$(( $(to_bytes "$PVC_SIZE") * 90 / 100 / mib * mib ))
+      [ "$pu" -gt "$cap" ] && { warn "PVC_SIZE=$PVC_SIZE holds only $(hr "$cap") per daemon - the dataset is smaller than wanted ($(hr "$pu"))"; pu=$cap; }
     fi
+    : "${FILE_SIZE:=64g}"
+    if [ -z "${FILES:-}" ]; then FILES=$(( pu / $(to_bytes "$FILE_SIZE") )); [ "$FILES" -ge 1 ] || FILES=1; fi
+    FILE_SIZE="$(( pu / FILES / mib ))m"          # the files together give exactly the dataset
     if [ "$PROTO" = xfs ] && [ -z "${PVC_SIZE:-}" ]; then   # + 5% and 10 GiB for the filesystem
       PVC_SIZE="$(( (FILES * $(to_bytes "$FILE_SIZE") * 105 / 100 + gib - 1) / gib + 10 ))Gi"
     fi
   else
-    if [ -z "${DEV_SIZE:-}" ]; then
-      if [ -n "${PVC_SIZE:-}" ]; then
-        cap=$(( $(to_bytes "$PVC_SIZE") / mib * mib ))
-        [ "$pu" -gt "$cap" ] && { warn "PVC_SIZE=$PVC_SIZE is smaller than the wanted $(hr "$pu") per daemon - testing the whole device"; pu=$cap; }
-      fi
-      DEV_SIZE="$(( pu / mib ))m"
+    if [ -n "${PVC_SIZE:-}" ]; then
+      cap=$(( $(to_bytes "$PVC_SIZE") / mib * mib ))
+      [ "$pu" -gt "$cap" ] && { warn "PVC_SIZE=$PVC_SIZE is smaller than the wanted $(hr "$pu") per daemon - testing the whole device"; pu=$cap; }
     fi
+    DEV_SIZE="$(( pu / mib ))m"
     [ -n "${PVC_SIZE:-}" ] || PVC_SIZE="$(( ($(to_bytes "$DEV_SIZE") + gib - 1) / gib ))Gi"
   fi
-  local per; per=$([ "$FAMILY" = file ] && echo "$FILES x $FILE_SIZE" || echo "$DEV_SIZE")
-  log "dataset: $per per $([ "$LAYOUT" = multi ] && echo "daemon x $units" || echo "shared target")$([ "$PROTO" = nfs ] || echo ", volumes of $PVC_SIZE")"
+  local per; per=$([ "$FAMILY" = file ] && echo "$FILES file(s) of $FILE_SIZE" || echo "$DEV_SIZE")
+  log "dataset: $(hr "$total") = $per per $([ "$LAYOUT" = multi ] && echo "daemon x $units" || echo "shared target")$([ "$PROTO" = nfs ] || echo ", volumes of $PVC_SIZE")"
 }
 size_dataset
 
-# IOPS tests: how long the measured random IO needs to go once through the dataset (IOPS_COVER_MIN wanted)
+# IOPS tests: how long the measured IO needs to go once through the dataset (IOPS_COVER_MIN wanted)
 cover_check() {
-  [ "$FAMILY" != s3 ] || return 0
   case "$TEST" in 01|02|05|06|08|09) ;; *) return 0 ;; esac
   [ "${DATASET_BYTES:-0}" -gt 0 ] || return 0
   local row; row=$(run_rows "$RUN_DIR" | head -1)
@@ -444,7 +457,7 @@ cover_check() {
   awk -F'\t' -v d="$DATASET_BYTES" -v c="$IOPS_COVER_MIN" '{ b=$3*1048576; if (b<=0) exit
     min=d/b/60; need=b*60*c
     printf "DATASET  %.0f GiB are gone through once every %.1f min at %d MiB/s (wanted >= %s min)\n", d/1073741824, min, $3, c
-    if (min < c) printf "WARNING: blocks are hit again after %.1f min. For %s min: DATASET_SIZE=%dg, or EXPECTED_IOPS=%d (4k IOs/s)\n", min, c, need/1073741824+1, need/4096/60/c }'  <<< "$row"
+    if (min < c) printf "WARNING: the same data is hit again after %.1f min. For %s min at this rate: DATASET_SIZE=%dg\n", min, c, need/1073741824+1 }'  <<< "$row"
 }
 case "$SPREAD" in preferred|required|even|none) ;; *) die "SPREAD must be preferred | required | even | none" ;; esac
 
@@ -454,10 +467,9 @@ case "$SPREAD" in preferred|required|even|none) ;; *) die "SPREAD must be prefer
   for v in PROTO TEST TNAME LAYOUT NAMESPACE REL PODS THREADS IODEPTH BS BS_MIX READ_PCT DURATION \
            FILES FILE_SIZE PVC_SIZE STORAGE_CLASS NFS_SERVER NFS_PATH NFS_STORAGE_CLASS NFS_VERS NCONNECT \
            RSIZE WSIZE NFS_EXTRA_OPTS S3_ENDPOINT S3_REGION BUCKET_PREFIX BUCKETS OBJ_SIZE OBJECTS \
-           TPUT_OBJ_SIZE TPUT_OBJECTS MIX_OBJECTS META_DIRS META_FILES EXTRA_ARGS SPREAD CPU CPU_LIMIT MEMORY \
-           PODS_PER_NODE TOLERATE_ALL NODE_SELECTOR LAT_READ_AVG_MAX LAT_READ_P99_MAX LAT_WRITE_AVG_MAX \
-           LAT_WRITE_P99_MAX TPUT_LAT_FACTOR DATASET_SIZE TPUT_DATASET IOPS_COVER_MIN EXPECTED_IOPS DATASET_PODS \
-           DEV_SIZE STORAGE_CACHE CACHE_FACTOR BLOCKVARPCT DETACH AIO RANGE_OBJ_SIZE RANGE_OBJECTS RANGE_BS; do
+           MIX_OBJECTS META_DIRS META_FILES EXTRA_ARGS SPREAD CPU CPU_LIMIT MEMORY \
+           PODS_PER_NODE TOLERATE_ALL NODE_SELECTOR LAT_READ LAT_WRITE TPUT_LAT_FACTOR DATASET_SIZE IOPS_COVER_MIN \
+           DATASET_PODS DEV_SIZE STORAGE_CACHE CACHE_FACTOR BLOCKVARPCT DETACH AIO RANGE_BS; do
     [ -n "${!v:-}" ] && printf '%s=%q\n' "$v" "${!v}"
   done
 } > "$RUN_DIR/params.env"

@@ -6,39 +6,25 @@
 # Every dataset kind lives under its own key prefix, so tests do not disturb each other.
 # "IOPS" for S3 = object requests/s (PUT/GET of OBJ_SIZE objects, one request per object).
 
-: "${OBJECTS:=1000}"          # IOPS tests: objects per thread
-: "${TPUT_OBJ_SIZE:=256m}"    # throughput tests: object size (multipart, part = BS)
-: "${TPUT_OBJECTS:=4}"        # throughput tests: objects per thread
-: "${MIX_OBJECTS:=20000}"     # mix tests: objects in the mixed-size dataset (all daemons)
+# Sizes: OBJ_SIZE (4k IOPS tests, 256m throughput / range tests) and DATASET_SIZE; OBJECTS (per thread) and
+# MIX_OBJECTS (mixes, in total) are computed by size_dataset in run.sh.
 : "${META_FILES:=2000}"       # test 11: objects per thread
-: "${RANGE_OBJ_SIZE:=256m}"   # test 16: size of the large objects (e.g. Parquet/ORC files)
-: "${RANGE_OBJECTS:=4}"       # test 16: large objects per thread
 : "${RANGE_BS:=64k:1,1m:2,8m:1}"  # test 16: size of every ranged GET (footer reads + column chunks)
 
 dataset_bytes() {
   case "$TEST" in
-    01|02|08|09) echo $(( OBJECTS * THREADS * PODS * $(to_bytes "$OBJ_SIZE") )) ;;
-    03|04)       echo $(( TPUT_OBJECTS * THREADS * PODS * $(to_bytes "$TPUT_OBJ_SIZE") )) ;;
+    01|02|08|09|03|04|16) echo $(( OBJECTS * THREADS * PODS * $(to_bytes "$OBJ_SIZE") )) ;;   # the part this run touches
     05|06|07)    echo $(( MIX_OBJECTS * $(mix_avg "$BS_MIX") )) ;;
     10)          echo $(( 1000 * PODS * $(to_bytes "$BS") )) ;;
-    16)          echo $(( RANGE_OBJECTS * THREADS * PODS * $(to_bytes "$RANGE_OBJ_SIZE") )) ;;
     *)           echo 0 ;;
   esac
 }
-dataset_hint() {
-  case "$TEST" in
-    01|02|08|09) echo "Raise OBJECTS (objects per thread) or OBJ_SIZE." ;;
-    03|04)       echo "Raise TPUT_OBJECTS or TPUT_OBJ_SIZE." ;;
-    05|06|07)    echo "Raise MIX_OBJECTS." ;;
-    16)          echo "Raise RANGE_OBJECTS or RANGE_OBJ_SIZE." ;;
-    *)           echo "Make the dataset larger." ;;
-  esac
-}
+dataset_hint() { echo "Raise DATASET_SIZE."; }
 
 if [ "$LAYOUT" = single ]; then BUCKETS_PATH="$BUCKET_PREFIX-single"
 else BUCKETS_PATH="$BUCKET_PREFIX-[1-$BUCKETS]"; fi
 TIMED=(--timelimit "$DURATION" --infloop)
-IOPS_DS=(-n 1 -N "$OBJECTS" -s "$OBJ_SIZE" -b "$OBJ_SIZE" --s3objprefix iops/)
+IOPS_DS=(-n 1 -N "${OBJECTS:-1}" -s "$OBJ_SIZE" -b "$OBJ_SIZE" --s3objprefix iops/)
 
 mkbuckets() {   # always (idempotent, cheap): buckets may have been deleted outside of this suite
   eb mkbuckets 0 ELBENCHO_HOSTS -d -t 1 "$BUCKETS_PATH"
@@ -67,11 +53,12 @@ prepare_iops() {
 }
 
 prepare_tput() {
-  local sig="$BUCKETS_PATH,obj=$TPUT_OBJ_SIZE,n=$TPUT_OBJECTS,b=$BS"
+  local sig="$BUCKETS_PATH,obj=$OBJ_SIZE,n=$OBJECTS,b=$BS"
+  local pt=$THREADS; [ "${PREP_MIN_THREADS:-0}" -gt "$pt" ] 2>/dev/null && pt=$PREP_MIN_THREADS
   if need_prepare_ranks tput "$sig"; then
-    log "preparing $((TPUT_OBJECTS*THREADS*PODS)) objects of $TPUT_OBJ_SIZE"
-    eb prepare 0 ELBENCHO_HOSTS -w -t "$THREADS" -n 1 -N "$TPUT_OBJECTS" -s "$TPUT_OBJ_SIZE" -b "$BS" --s3objprefix tput/ "$BUCKETS_PATH"
-    ds_set tput "$sig,ranks=$((PODS * THREADS))"
+    log "preparing $((OBJECTS*pt*PODS)) objects of $OBJ_SIZE"
+    eb prepare 0 ELBENCHO_HOSTS -w -t "$pt" -n 1 -N "$OBJECTS" -s "$OBJ_SIZE" -b "$BS" --s3objprefix tput/ "$BUCKETS_PATH"
+    ds_set tput "$sig,ranks=$((PODS * pt))"
   fi
 }
 
@@ -125,20 +112,21 @@ run_test() {
     01|09) eb "$TNAME" 1 ELBENCHO_HOSTS -w -t "$THREADS" --iodepth "$IODEPTH" "${IOPS_DS[@]}" "${TIMED[@]}" "$BUCKETS_PATH" ;;
     02|08) prepare_iops
            eb "$TNAME" 1 ELBENCHO_HOSTS -r --s3fastget -t "$THREADS" --iodepth "$IODEPTH" "${IOPS_DS[@]}" "${TIMED[@]}" "$BUCKETS_PATH" ;;
-    03)    eb "$TNAME" 1 ELBENCHO_HOSTS -w -t "$THREADS" --iodepth "$IODEPTH" -n 1 -N "$TPUT_OBJECTS" -s "$TPUT_OBJ_SIZE" -b "$BS" --s3objprefix tput/ "${TIMED[@]}" "$BUCKETS_PATH" ;;
+    03)    eb "$TNAME" 1 ELBENCHO_HOSTS -w -t "$THREADS" --iodepth "$IODEPTH" -n 1 -N "$OBJECTS" -s "$OBJ_SIZE" -b "$BS" --s3objprefix tput/ "${TIMED[@]}" "$BUCKETS_PATH" ;;
     04)    prepare_tput
-           eb "$TNAME" 1 ELBENCHO_HOSTS -r --s3fastget -t "$THREADS" --iodepth "$IODEPTH" -n 1 -N "$TPUT_OBJECTS" -s "$TPUT_OBJ_SIZE" -b "$BS" --s3objprefix tput/ "${TIMED[@]}" "$BUCKETS_PATH" ;;
+           eb "$TNAME" 1 ELBENCHO_HOSTS -r --s3fastget -t "$THREADS" --iodepth "$IODEPTH" -n 1 -N "$OBJECTS" -s "$OBJ_SIZE" -b "$BS" --s3objprefix tput/ "${TIMED[@]}" "$BUCKETS_PATH" ;;
     05|06|07) mix_test ;;
     10)    local l=(-t 1 -n 1 -N 1000 -s "$BS" -b "$BS" --s3objprefix lat/)
            eb lat-put 1 ELBENCHO_HOSTS -w "${l[@]}" "${TIMED[@]}" "$BUCKETS_PATH"
            eb lat-get 1 ELBENCHO_HOSTS -r --s3fastget "${l[@]}" "${TIMED[@]}" "$BUCKETS_PATH" ;;
     16)    # random byte-range GETs inside large objects (analytics engines reading Parquet/ORC)
-           local r=(-n 1 -N "$RANGE_OBJECTS" -s "$RANGE_OBJ_SIZE" --s3objprefix range/)
-           local sig="$BUCKETS_PATH,obj=$RANGE_OBJ_SIZE,n=$RANGE_OBJECTS"
+           local r=(-n 1 -N "$OBJECTS" -s "$OBJ_SIZE" --s3objprefix range/)
+           local sig="$BUCKETS_PATH,obj=$OBJ_SIZE,n=$OBJECTS"
+           local pt=$THREADS; [ "${PREP_MIN_THREADS:-0}" -gt "$pt" ] 2>/dev/null && pt=$PREP_MIN_THREADS
            if need_prepare_ranks range "$sig"; then
-             log "preparing $((RANGE_OBJECTS*THREADS*PODS)) objects of $RANGE_OBJ_SIZE"
-             eb prepare 0 ELBENCHO_HOSTS -w -t "$THREADS" "${r[@]}" -b 16m "$BUCKETS_PATH"
-             ds_set range "$sig,ranks=$((PODS * THREADS))"
+             log "preparing $((OBJECTS*pt*PODS)) objects of $OBJ_SIZE"
+             eb prepare 0 ELBENCHO_HOSTS -w -t "$pt" "${r[@]}" -b 16m "$BUCKETS_PATH"
+             ds_set range "$sig,ranks=$((PODS * pt))"
            fi
            log "random ranged GETs ($RANGE_BS) at random offsets of random objects"
            eb "$TNAME" 1 ELBENCHO_HOSTS -r --s3randobj --s3fastget -t "$THREADS" --iodepth "$IODEPTH" "${r[@]}" -b "$RANGE_BS" \

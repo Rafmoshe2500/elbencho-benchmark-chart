@@ -8,7 +8,7 @@ P=${1:?usage: run-suite.sh <protocol> [TESTS=\"01 02\"] [KEY=VALUE ...]}; shift
 TESTS=${TESTS:-}
 args=()
 for kv in "$@"; do case $kv in TESTS=*) TESTS=${kv#TESTS=} ;; *) args+=("$kv") ;; esac; done
-[ -n "$TESTS" ] || TESTS=$(cd "$D/$P" && ls [01][0-9]-*.sh | grep -vE "^1[2-5]-" | cut -c1-2 | tr "\n" " ")
+[ -n "$TESTS" ] || TESTS=$(cd "$D/$P" && ls [01][0-9]-*.sh | grep -vE "^1[2-57]-" | cut -c1-2 | tr "\n" " ")
 failed=()
 for t in $TESTS; do
   echo; echo "================= $P test $t ================="

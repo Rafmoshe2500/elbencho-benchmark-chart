@@ -3,6 +3,6 @@
 #
 # usage: ./06-mix70-4k.sh [KEY=VALUE ...]      e.g.  ./06-mix70-4k.sh STORAGE_CLASS=my-block-sc PODS=4
 # test tunables:     PODS THREADS IODEPTH BS_MIX READ_PCT DURATION
-# protocol settings: STORAGE_CLASS PVC_SIZE DEV_SIZE   (defaults: profile.env)
+# protocol settings: STORAGE_CLASS DATASET_SIZE PVC_SIZE   (defaults: profile.env)
 # general:           NAMESPACE CPU MEMORY SPREAD NODE_SELECTOR PREPARE KEEP LAT EXTRA_ARGS  (see ../README.md)
 exec "$(dirname "$0")/../lib/run.sh" raw-block 06 "$@"
