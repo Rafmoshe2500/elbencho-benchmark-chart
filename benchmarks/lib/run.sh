@@ -197,7 +197,7 @@ case "$TEST" in
   05)          : "${BS_MIX:=32k:1,64k:1,128k:1}";  : "${THREADS:=16}"; : "${IODEPTH:=8}" ;;
   06)          : "${BS_MIX:=$MIX_SMALL_DEFAULT}";  : "${THREADS:=16}"; : "${IODEPTH:=16}" ;;
   07)          : "${BS_MIX:=256k:1,512k:1,1m:1}";  : "${THREADS:=8}";  : "${IODEPTH:=4}" ;;
-  10)          : "${BS:=4k}"; THREADS=${LAT_THREADS:-1}; IODEPTH=${LAT_IODEPTH:-1}; : "${DURATION:=30}" ;;  # always QD1 unless LAT_*
+  10)          : "${BS:=4k}"; THREADS=${LAT_THREADS:-1}; IODEPTH=${LAT_IODEPTH:-1} ;;  # always QD1 unless LAT_*
   11)          : "${THREADS:=16}"; : "${IODEPTH:=1}" ;;
 esac
 : "${READ_PCT:=70}"
@@ -213,7 +213,7 @@ if [ "$FAMILY" = s3 ]; then
     16)          THREADS=${USER_THREADS:-16}; IODEPTH=${USER_IODEPTH:-1}; : "${OBJ_SIZE:=256m}" ;;
   esac
 fi
-: "${DURATION:=60}"            # seconds per timed phase
+: "${DURATION:=300}"           # seconds per timed phase (5 min: past write caches, steadier numbers)
 
 # ------------------------------------------------------- sweeps (12, 17) ---
 # 12: sweep over pods / threads / iodepth / nconnect / dataset size (any combination, every step runs),

@@ -307,7 +307,7 @@ footer .wrap { padding-block: 18px; }
         <tr><td class="k">IODEPTH</td><td class="k">לפי בדיקה</td><td>עומק תור אסינכרוני (libaio) לכל thread</td></tr>
         <tr><td class="k">BS / BS_MIX</td><td class="k">לפי בדיקה</td><td>גודל בלוק, או תמהיל משוקלל כמו <code>16k:2,64k:1</code></td></tr>
         <tr><td class="k">READ_PCT</td><td class="k">70</td><td>אחוז הקריאות בבדיקות 05–07</td></tr>
-        <tr><td class="k">DURATION</td><td class="k">60</td><td>שניות לכל שלב נמדד (בבדיקה 10: 30)</td></tr>
+        <tr><td class="k">DURATION</td><td class="k">300</td><td>שניות לכל שלב נמדד, בכל הבדיקות (5 דקות). גם כל צעד ב-sweep וב-find-max</td></tr>
         <tr><td class="k">CPU</td><td class="k">– (עם PODS=auto: auto)</td><td>CPU request לכל פוד, למשל <code>CPU=8</code>. <code>auto</code>: <code>CPU_SHARE</code>% מה-CPU הפנוי בצומת החלש ביותר, מחולק בין הפודים שלו. <code>none</code>: בלי request</td></tr>
         <tr><td class="k">CPU_SHARE / CPU_LIMIT</td><td class="k">80 / 0</td><td>אחוז ה-CPU הפנוי שמוקצה עם <code>CPU=auto</code>. <code>CPU_LIMIT=1</code> מוסיף limit שווה ל-request (Guaranteed, ליבות ייעודיות עם static CPU manager). ברירת המחדל בלי limit, כי throttling נראה כמו latency של ה-storage</td></tr>
         <tr><td class="k">MEMORY</td><td class="k">–</td><td>request = limit לכל daemon, למשל <code>MEMORY=16Gi</code></td></tr>
@@ -490,7 +490,7 @@ cores      = target_IOPS / IOPS_per_core       <span class="c"># ראה "ללי�
         <tr><td class="n">07</td><td>Mix 70/30 · 256k–1m</td><td>אותו דבר בבלוקים גדולים</td><td><span class="tag">8 thr · QD4</span></td><td class="args">--rwmixpct 70 --rand -b 256k:1,512k:1,1m:1</td></tr>
         <tr><td class="n">08</td><td>Read IOPS, יעד יחיד</td><td>כל הפודים על אותם קבצים</td><td><span class="tag">כמו 02</span></td><td class="args">-r --rand (בלי --nosvcshare)</td></tr>
         <tr><td class="n">09</td><td>Write IOPS, יעד יחיד</td><td>כמו 08, כתיבה</td><td><span class="tag">כמו 01</span></td><td class="args">-w --rand</td></tr>
-        <tr><td class="n">10</td><td>Latency QD1</td><td>latency טהור: thread אחד, עומק 1, עם p99.99</td><td><span class="tag">4k · 1 thr · QD1 · 30s</span></td><td class="args">-r/-w --rand -t 1 --iodepth 1 --latpercent9s 2</td></tr>
+        <tr><td class="n">10</td><td>Latency QD1</td><td>latency טהור: thread אחד, עומק 1, עם p99.99</td><td><span class="tag">4k · 1 thr · QD1 · 5 min</span></td><td class="args">-r/-w --rand -t 1 --iodepth 1 --latpercent9s 2</td></tr>
         <tr><td class="n">11</td><td>Metadata</td><td>create, stat ו-delete של הרבה קבצים ריקים</td><td><span class="tag">16 thr · 10000 files לכל thread</span></td><td class="args">-d -w -s 0 / --stat / -F -D · META_FILES META_DIRS</td></tr>
         <tr><td class="n">12</td><td>Scaling sweep</td><td>בדיקה אחרת עם 1→8 פודים, ו-nconnect שונים</td><td><span class="tag">SWEEP_PODS="1 2 4 8"</span></td><td class="args">SWEEP_TEST SWEEP_PODS SWEEP_THREADS SWEEP_IODEPTH SWEEP_NCONNECT SWEEP_DATASET_SIZE</td></tr>
         <tr><td class="n">14</td><td>AI Training</td><td>epochs בסדר אקראי, checkpoint, restore</td><td><span class="tag">resnet50 · 3 epochs · 8g ckpt</span></td><td class="args">--treefile --treerand · -d -w (ckpt)</td></tr>
@@ -525,9 +525,9 @@ dataset          = PODS × FILES × FILE_SIZE   <span class="c"># multi. ב-sing
 ./benchmarks/nfs/17-find-max.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench SWEEP_TEST=01
 ./benchmarks/nfs/17-find-max.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench SWEEP_TEST=04</pre></div></div>
 
-      <div class="run"><h3>בסיס מלא <span class="why">כל הבדיקות 01–11 על אותה פריסה, דקתיים לכל שלב</span></h3>
+      <div class="run"><h3>בסיס מלא <span class="why">כל הבדיקות 01–11 על אותה פריסה, 5 דקות לכל שלב</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/run-suite.sh nfs NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench \
-  PODS=4 DURATION=120 SPREAD=required</pre></div></div>
+  PODS=4 SPREAD=required</pre></div></div>
 
       <div class="run"><h3>מקסימום Read IOPS <span class="why">הרבה בקשות פתוחות, rsize קטן, nconnect גבוה</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/02-read-iops.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench \
@@ -568,7 +568,7 @@ dataset          = PODS × FILES × FILE_SIZE   <span class="c"># multi. ב-sing
 
       <div class="run"><h3>Metadata ו-latency <span class="why">create, stat, delete; ואז QD1 לבדיקת זמן תגובה</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/11-metadata.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench PODS=4 META_FILES=10000
-./benchmarks/nfs/10-latency-qd1.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench PODS=1 DURATION=120</pre></div></div>
+./benchmarks/nfs/10-latency-qd1.sh NFS_SERVER=10.0.0.10 NFS_PATH=/export/bench PODS=1</pre></div></div>
 
       <div class="run"><h3>עם StorageClass קיים <span class="why">כשה-NFS כבר מחובר דרך CSI</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/nfs/02-read-iops.sh NFS_STORAGE_CLASS=nfs-csi PODS=4</pre></div></div>
@@ -612,7 +612,7 @@ dataset          = PODS × FILES × FILE_SIZE   <span class="c"># multi. ב-sing
         <tr><td class="n">07</td><td>Mix 70/30 · 256k–1m</td><td>תמהיל רנדומלי, בלוקים גדולים</td><td><span class="tag">8 thr · QD4</span></td><td class="args">--rwmixpct 70 --rand -b 256k:1,512k:1,1m:1</td></tr>
         <tr><td class="n">08</td><td>Read IOPS, PVC יחיד</td><td>כל הפודים על PVC אחד (אותו צומת)</td><td><span class="tag">כמו 02</span></td><td class="args">-r --rand</td></tr>
         <tr><td class="n">09</td><td>Write IOPS, PVC יחיד</td><td>כמו 08, כתיבה</td><td><span class="tag">כמו 01</span></td><td class="args">-w --rand</td></tr>
-        <tr><td class="n">10</td><td>Latency QD1</td><td>latency טהור עם p99.99</td><td><span class="tag">4k · QD1 · 30s</span></td><td class="args">-t 1 --iodepth 1 --latpercent9s 2</td></tr>
+        <tr><td class="n">10</td><td>Latency QD1</td><td>latency טהור עם p99.99</td><td><span class="tag">4k · QD1 · 5 min</span></td><td class="args">-t 1 --iodepth 1 --latpercent9s 2</td></tr>
         <tr><td class="n">11</td><td>Metadata</td><td>create, stat, delete</td><td><span class="tag">16 thr · 10×1000</span></td><td class="args">-d -w -s 0 / --stat / -F -D · META_FILES META_DIRS</td></tr>
         <tr><td class="n">12</td><td>Scaling sweep</td><td>1→8 פודים</td><td><span class="tag">SWEEP_PODS</span></td><td class="args">SWEEP_TEST SWEEP_PODS SWEEP_THREADS SWEEP_IODEPTH SWEEP_DATASET_SIZE</td></tr>
         <tr><td class="n">17</td><td>Find max</td><td>עומס שגדל עד יעד ה-latency, עד רוויה, או עד שהפודים נחנקים</td><td><span class="tag">PODS=auto · QD 1→128</span></td><td class="args">SWEEP_TEST SWEEP_IODEPTH LAT_READ LAT_WRITE</td></tr>
@@ -639,7 +639,7 @@ dataset     = PODS × FILES × FILE_SIZE            <span class="c"># FILES × F
 
       <div class="run"><h3>בסיס מלא <span class="why">PVC של 200Gi לכל פוד, dataset של 64GB לפוד</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/run-suite.sh xfs STORAGE_CLASS=my-xfs-sc \
-  PODS=4 DURATION=120 SPREAD=required</pre></div></div>
+  PODS=4 SPREAD=required</pre></div></div>
 
       <div class="run"><h3>מקסימום Read IOPS <span class="why">16 threads × עומק 32 = 512 בקשות פתוחות לפוד</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/xfs/02-read-iops.sh STORAGE_CLASS=my-xfs-sc PODS=4 THREADS=16 IODEPTH=32</pre></div></div>
@@ -663,7 +663,7 @@ dataset     = PODS × FILES × FILE_SIZE            <span class="c"># FILES × F
   SWEEP_DATASET_SIZE="64g 256g 1t 4t" STORAGE_CACHE=256g</pre></div></div>
 
       <div class="run"><h3>Latency ו-metadata <span class="why">זמן תגובה של קריאה אחת, ויצירת קבצים</span></h3>
-<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/xfs/10-latency-qd1.sh STORAGE_CLASS=my-xfs-sc PODS=1 DURATION=120
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/xfs/10-latency-qd1.sh STORAGE_CLASS=my-xfs-sc PODS=1
 ./benchmarks/xfs/11-metadata.sh STORAGE_CLASS=my-xfs-sc PODS=4 META_FILES=10000 META_DIRS=1   <span class="c"># 10000 קבצים בתיקייה אחת לכל thread: תיקיות גדולות</span></pre></div></div>
     </div>
   </div>
@@ -707,7 +707,7 @@ dataset     = PODS × FILES × FILE_SIZE            <span class="c"># FILES × F
         <tr><td class="n">07</td><td>Mix 70/30 · 256k–1m</td><td>תמהיל, בלוקים גדולים</td><td><span class="tag">8 thr · QD4</span></td><td class="args">--rwmixpct 70 --rand -b 256k:1,512k:1,1m:1</td></tr>
         <tr><td class="n">08</td><td>Read IOPS, התקן יחיד</td><td>כל הפודים על התקן אחד (אותו צומת)</td><td><span class="tag">כמו 02</span></td><td class="args">-r --rand (הטווח מתחלק)</td></tr>
         <tr><td class="n">09</td><td>Write IOPS, התקן יחיד</td><td>כמו 08, כתיבה</td><td><span class="tag">כמו 01</span></td><td class="args">-w --rand</td></tr>
-        <tr><td class="n">10</td><td>Latency QD1</td><td>latency טהור עם p99.99</td><td><span class="tag">4k · QD1 · 30s</span></td><td class="args">-t 1 --iodepth 1 --latpercent9s 2</td></tr>
+        <tr><td class="n">10</td><td>Latency QD1</td><td>latency טהור עם p99.99</td><td><span class="tag">4k · QD1 · 5 min</span></td><td class="args">-t 1 --iodepth 1 --latpercent9s 2</td></tr>
         <tr><td class="n">12</td><td>Scaling sweep</td><td>1→8 פודים</td><td><span class="tag">SWEEP_PODS</span></td><td class="args">SWEEP_TEST SWEEP_PODS SWEEP_THREADS SWEEP_IODEPTH SWEEP_DATASET_SIZE</td></tr>
         <tr><td class="n">17</td><td>Find max</td><td>עומס שגדל עד יעד ה-latency, עד רוויה, או עד שהפודים נחנקים</td><td><span class="tag">PODS=auto · QD 1→128</span></td><td class="args">SWEEP_TEST SWEEP_IODEPTH LAT_READ LAT_WRITE</td></tr>
       </tbody>
@@ -739,7 +739,7 @@ fill_time    = PVC_SIZE / device_write_MiB_s      <span class="c"># פעם אח�
 
       <div class="run"><h3>בסיס מלא <span class="why">התקן של 200Gi לכל פוד. המילוי הראשוני רץ פעם אחת</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/run-suite.sh raw-block STORAGE_CLASS=my-block-sc \
-  PODS=4 DURATION=120 SPREAD=required</pre></div></div>
+  PODS=4 SPREAD=required</pre></div></div>
 
       <div class="run"><h3>מקסימום Write IOPS, מצב יציב <span class="why">עומק 64 למשך 10 דקות</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/raw-block/01-write-iops.sh STORAGE_CLASS=my-block-sc PODS=4 IODEPTH=64 DURATION=600</pre></div></div>
@@ -762,8 +762,8 @@ fill_time    = PVC_SIZE / device_write_MiB_s      <span class="c"># פעם אח�
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/raw-block/12-scaling-sweep.sh STORAGE_CLASS=my-block-sc SWEEP_TEST=02 SWEEP_PODS=4 \
   SWEEP_DATASET_SIZE="128g 512g 2t" STORAGE_CACHE=256g</pre></div></div>
 
-      <div class="run"><h3>Latency של קריאה אחת <span class="why">פוד אחד, QD1, שתי דקות</span></h3>
-<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/raw-block/10-latency-qd1.sh STORAGE_CLASS=my-block-sc PODS=1 DURATION=120</pre></div></div>
+      <div class="run"><h3>Latency של קריאה אחת <span class="why">פוד אחד, QD1, 5 דקות</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/raw-block/10-latency-qd1.sh STORAGE_CLASS=my-block-sc PODS=1</pre></div></div>
     </div>
   </div>
 </section>
@@ -811,7 +811,7 @@ kubectl -n elbencho-bench create secret generic s3-creds \
         <tr><td class="n">07</td><td>Mix 70/30 · 256k–1m</td><td>אובייקטים של 256k, 512k ו-1m</td><td><span class="tag">20 thr</span></td><td class="args">BS_MIX=256k:1,512k:1,1m:1</td></tr>
         <tr><td class="n">08</td><td>Read IOPS, bucket יחיד</td><td>כל הפודים על bucket אחד</td><td><span class="tag">כמו 02</span></td><td class="args">elbencho-single</td></tr>
         <tr><td class="n">09</td><td>Write IOPS, bucket יחיד</td><td>כמו 08, PUT</td><td><span class="tag">כמו 01</span></td><td class="args">elbencho-single</td></tr>
-        <tr><td class="n">10</td><td>Latency</td><td>PUT ו-GET עם thread אחד, עם p99.99</td><td><span class="tag">4k · 1 thr · 30s</span></td><td class="args">-t 1 --latpercent9s 2</td></tr>
+        <tr><td class="n">10</td><td>Latency</td><td>PUT ו-GET עם thread אחד, עם p99.99</td><td><span class="tag">4k · 1 thr · 5 min</span></td><td class="args">-t 1 --latpercent9s 2</td></tr>
         <tr><td class="n">11</td><td>Metadata</td><td>PUT, LIST, HEAD ו-DELETE</td><td><span class="tag">16 thr · 2000</span></td><td class="args">-w -s 0 / --s3listobjpar / --stat / -F</td></tr>
         <tr><td class="n">12</td><td>Scaling sweep</td><td>1→8 פודים</td><td><span class="tag">SWEEP_PODS</span></td><td class="args">SWEEP_TEST SWEEP_PODS SWEEP_THREADS SWEEP_DATASET_SIZE</td></tr>
         <tr><td class="n">14</td><td>AI Training</td><td>epochs בסדר אקראי, checkpoint, restore</td><td><span class="tag">resnet50 · 16m reads</span></td><td class="args">--treefile --treerand --s3fastget</td></tr>
@@ -870,7 +870,7 @@ objects/thread = DATASET_SIZE / (OBJ_SIZE × PODS × THREADS)</pre></div>
 
       <div class="run"><h3>בסיס מלא <span class="why">כל הבדיקות 01–11</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/run-suite.sh s3 S3_ENDPOINT=http://minio.minio.svc:9000 S3_SECRET_NAME=s3-creds \
-  PODS=4 DURATION=120 SPREAD=required</pre></div></div>
+  PODS=4 SPREAD=required</pre></div></div>
 
       <div class="run"><h3>אובייקטים קטנים: PUT ו-GET <span class="why">64 threads לפוד, 8 פודים</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/s3/01-write-iops.sh S3_ENDPOINT=http://minio.minio.svc:9000 S3_SECRET_NAME=s3-creds PODS=8 THREADS=64

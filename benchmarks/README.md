@@ -59,7 +59,7 @@ kubectl -n elbencho-bench create secret generic s3-creds \
 ./benchmarks/nfs/02-read-iops.sh              $N PODS=8 NCONNECT=16 RSIZE=65536
 ./benchmarks/s3/02-read-iops.sh               $S PODS=8 THREADS=64 OBJ_SIZE=64k
 ./benchmarks/xfs/08-single-target-read-iops.sh $B PODS=4      # all pods on ONE volume (same node for RWO)
-./benchmarks/raw-block/10-latency-qd1.sh      $B PODS=1 DURATION=120              # pure latency, QD1
+./benchmarks/raw-block/10-latency-qd1.sh      $B PODS=1                           # pure latency, QD1
 ./benchmarks/nfs/11-metadata.sh               $N PODS=4 META_FILES=10000          # create / stat / delete
 ```
 
@@ -75,9 +75,9 @@ protocol (see "Latency targets"). One run per direction and kind:
 ./benchmarks/nfs/17-find-max.sh       $N SWEEP_TEST=02 NCONNECT=16
 ./benchmarks/s3/17-find-max.sh        $S SWEEP_TEST=02     # THREADS 8 -> 256
 
-# own targets, longer steps, two daemons per node, only worker nodes
+# own targets, shorter steps (2 min instead of 5), two daemons per node, only worker nodes
 ./benchmarks/raw-block/17-find-max.sh $B SWEEP_TEST=01 LAT_WRITE=1/5 \
-  DURATION=180 PODS_PER_NODE=2 NODE_SELECTOR=node-role.kubernetes.io/worker= TOLERATE_ALL=0
+  DURATION=120 PODS_PER_NODE=2 NODE_SELECTOR=node-role.kubernetes.io/worker= TOLERATE_ALL=0
 # own ladder: more threads per pod and deeper queues
 ./benchmarks/raw-block/17-find-max.sh $B SWEEP_TEST=02 THREADS=32 SWEEP_IODEPTH="8 16 32 64 128 256"
 ```
@@ -109,7 +109,7 @@ See "Sweeps" below for all kinds.
 
 ### 5. A whole suite on one deployment
 ```bash
-./benchmarks/run-suite.sh raw-block $B PODS=auto DURATION=120              # 01..10 (11 needs a filesystem)
+./benchmarks/run-suite.sh raw-block $B PODS=auto                           # 01..10 (11 needs a filesystem)
 ./benchmarks/run-suite.sh xfs $B TESTS="01 02 03 04" PODS=8 CONTINUE=1     # continue after a failed test
 ./benchmarks/run-suite.sh s3 $S TESTS="01 02 05" PODS=8
 ```
@@ -222,7 +222,7 @@ IODEPTH` (S3 IOPS tests: `PODS × THREADS`).
 | `BS` | 4k (IOPS), 1m (throughput) | block size per IO (S3: object size / part size) | Bigger blocks = fewer IOPS, more MiB/s, higher latency per IO. 4k shows the IO path, 1m+ the bandwidth |
 | `BS_MIX` | per test 05/06/07 | weighted sizes, e.g. `16k:2,64k:1` | Makes the mix look like a real application |
 | `READ_PCT` | 70 | read share in tests 05–07 | Higher = more reads; writes are usually the costlier side on flash with protection (RAID/EC/replication) |
-| `DURATION` | 60 (test 10: 30) | seconds per measured phase | Longer = steadier numbers; 1800 for flash steady state (garbage collection, write cache full) |
+| `DURATION` | 300 (5 min, every test) | seconds per measured phase (every step of a sweep / find-max too) | Longer = steadier numbers; 1800 for flash steady state; shorter (60) for a quick look (garbage collection, write cache full) |
 | `EXTRA_ARGS` | – | extra elbencho args for the measured phase | Anything elbencho supports, e.g. `--lathisto` |
 
 ### Latency targets
