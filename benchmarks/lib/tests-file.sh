@@ -7,8 +7,8 @@
 
 # FILES and FILE_SIZE are set by size_dataset (run.sh) from DATASET_SIZE
 : "${PREP_THREADS:=8}"
-: "${META_DIRS:=10}"        # test 11: dirs per thread
-: "${META_FILES:=1000}"     # test 11: files per dir
+: "${META_FILES:=10000}"    # test 11: files per thread (same meaning as on S3: objects per thread)
+: "${META_DIRS:=}"          # test 11: directories per thread; default: one directory per 1000 files
 
 if [ "$FILES" = 1 ]; then PATHS=/data/f1; else PATHS="/data/f[1-$FILES]"; fi
 
@@ -46,7 +46,11 @@ run_test() {
     10)    prepare
            eb lat-randread  1 ELBENCHO_HOSTS -r --rand -b "$BS" "${io[@]}" "${TIMED[@]}" "$PATHS"
            eb lat-randwrite 1 ELBENCHO_HOSTS -w --rand -b "$BS" "${io[@]}" "${TIMED[@]}" "$PATHS" ;;
-    11)    local m=(-t "$THREADS" -n "$META_DIRS" -N "$META_FILES" -s 0 /data)
+    11)    # META_FILES per thread, spread over META_DIRS directories of every thread (elbencho -n dirs, -N files per dir)
+           local d=${META_DIRS:-$(( (META_FILES + 999) / 1000 ))}; [ "$d" -ge 1 ] 2>/dev/null || d=1
+           local per=$(( (META_FILES + d - 1) / d ))
+           log "metadata: $d directory(s) x $per files per thread = $((d * per)) files per thread"
+           local m=(-t "$THREADS" -n "$d" -N "$per" -s 0 /data)
            eb meta-create 1 ELBENCHO_HOSTS -d -w "${m[@]}"
            eb meta-stat   1 ELBENCHO_HOSTS --stat "${m[@]}"
            eb meta-delete 1 ELBENCHO_HOSTS -F -D "${m[@]}" ;;

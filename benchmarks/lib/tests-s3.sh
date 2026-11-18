@@ -8,7 +8,7 @@
 
 # Sizes: OBJ_SIZE (4k IOPS tests, 256m throughput / range tests) and DATASET_SIZE; OBJECTS (per thread) and
 # MIX_OBJECTS (mixes, in total) are computed by size_dataset in run.sh.
-: "${META_FILES:=2000}"       # test 11: objects per thread
+: "${META_FILES:=2000}"       # test 11: objects per thread (S3 has no directories: META_DIRS does not apply)
 : "${RANGE_BS:=64k:1,1m:2,8m:1}"  # test 16: size of every ranged GET (footer reads + column chunks)
 
 dataset_bytes() {
@@ -131,7 +131,8 @@ run_test() {
            log "random ranged GETs ($RANGE_BS) at random offsets of random objects"
            eb "$TNAME" 1 ELBENCHO_HOSTS -r --s3randobj --s3fastget -t "$THREADS" --iodepth "$IODEPTH" "${r[@]}" -b "$RANGE_BS" \
               --randamount "$(( $(dataset_bytes) * 1000 ))" "${TIMED[@]}" "$BUCKETS_PATH" ;;
-    11)    local m=(-t "$THREADS" -n 1 -N "$META_FILES" -s 0 --s3objprefix meta/)
+    11)    [ -z "${META_DIRS:-}" ] || warn "META_DIRS has no effect on S3 (objects have no directories)"
+           local m=(-t "$THREADS" -n 1 -N "$META_FILES" -s 0 --s3objprefix meta/)
            eb meta-create 1 ELBENCHO_HOSTS -w "${m[@]}" "$BUCKETS_PATH"
            eb meta-list   1 ELBENCHO_HOSTS --s3listobjpar "${m[@]}" "$BUCKETS_PATH"
            eb meta-head   1 ELBENCHO_HOSTS --stat "${m[@]}" "$BUCKETS_PATH"

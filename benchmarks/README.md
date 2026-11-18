@@ -60,7 +60,7 @@ kubectl -n elbencho-bench create secret generic s3-creds \
 ./benchmarks/s3/02-read-iops.sh               $S PODS=8 THREADS=64 OBJ_SIZE=64k
 ./benchmarks/xfs/08-single-target-read-iops.sh $B PODS=4      # all pods on ONE volume (same node for RWO)
 ./benchmarks/raw-block/10-latency-qd1.sh      $B PODS=1 DURATION=120              # pure latency, QD1
-./benchmarks/nfs/11-metadata.sh               $N PODS=4                           # create / stat / delete
+./benchmarks/nfs/11-metadata.sh               $N PODS=4 META_FILES=10000          # create / stat / delete
 ```
 
 ### 2. The maximum within the latency target (test 17)
@@ -216,14 +216,13 @@ IODEPTH` (S3 IOPS tests: `PODS × THREADS`).
 | `PODS_PER_NODE` | 1 | `PODS=auto`: daemons per node | 2+ uses more of each node's CPU; helps when one pod per node is CPU-bound. NFS: pods on one node share the mount's connections, so it helps less |
 | `TOLERATE_ALL` | 1 with `PODS=auto`, else 0 | tolerate every taint | 1 = control-plane / tainted nodes generate load too. 0 = only untainted nodes |
 | `NODE_SELECTOR` | – | `key=value` node label | Limits the load generators (and `PODS=auto`) to these nodes, e.g. keep them off the storage nodes |
-| `SPREAD` | preferred | `preferred`, `required`, `even`, `none` | `required` = at most one pod per node (fails if there are more pods than nodes); `even` = the same number on every node; `none` = may pile up on one node and hit its CPU/network |
+| `SPREAD` | preferred | `preferred`, `required`, `none` (with `PODS=auto` it is set automatically) | `required` = at most one pod per node (fails if there are more pods than nodes); `none` = may pile up on one node and hit its CPU/network |
 | `THREADS` | 16 (IOPS), 8 (throughput); S3 32 / 16 | I/O threads per daemon | More threads = more concurrency and more CPU. On S3 IOPS tests it is the only per-pod concurrency knob |
 | `IODEPTH` | 16 (IOPS), 4 (throughput) | async queue depth per thread (libaio) | Raises concurrency at low CPU cost: IOPS grow until the storage saturates, then only latency grows. No effect on S3 whole-object requests |
 | `BS` | 4k (IOPS), 1m (throughput) | block size per IO (S3: object size / part size) | Bigger blocks = fewer IOPS, more MiB/s, higher latency per IO. 4k shows the IO path, 1m+ the bandwidth |
 | `BS_MIX` | per test 05/06/07 | weighted sizes, e.g. `16k:2,64k:1` | Makes the mix look like a real application |
 | `READ_PCT` | 70 | read share in tests 05–07 | Higher = more reads; writes are usually the costlier side on flash with protection (RAID/EC/replication) |
 | `DURATION` | 60 (test 10: 30) | seconds per measured phase | Longer = steadier numbers; 1800 for flash steady state (garbage collection, write cache full) |
-| `LAT_THREADS` / `LAT_IODEPTH` | 1 / 1 | test 10 load | Above 1 test 10 is no longer pure single-request latency |
 | `EXTRA_ARGS` | – | extra elbencho args for the measured phase | Anything elbencho supports, e.g. `--lathisto` |
 
 ### Latency targets
@@ -232,8 +231,6 @@ IODEPTH` (S3 IOPS tests: `PODS × THREADS`).
 | `LAT_READ` | block, xfs, nfs: `2/5`; S3: `30/90` | read target, `avg/p99` in ms | Every run prints `TARGET ... within / OVER`; test 17 stops at the first step over it. Higher = test 17 goes to a higher load (more IOPS, worse latency). `-/5` = only p99, `2` = only average, empty = no target |
 | `LAT_WRITE` | block, xfs: `2/10`; nfs: `5/15`; S3: `30/90` | write target, `avg/p99` in ms | Same, for writes. In a mix both are checked, each on its own direction |
 | `TPUT_LAT_FACTOR` | 10 (S3: 1) | multiplier of the targets for 03, 04, 07 | A 1 MiB IO takes longer than a 4k IO. Lower = throughput ladders stop earlier |
-| `MIN_GAIN` | 3 | % a step must gain over the best so far | Higher = test 17 calls "saturated" sooner |
-| `FIND_STOP` | 1 (test 17), 0 (12) | stop a ladder at over-target / client-limited / 2 flat steps | 0 = run every step anyway (the whole curve) |
 | `SWEEP_TEST` | 02 | the test a sweep / test 17 runs | 01 write IOPS, 02 read IOPS, 03 / 04 write / read throughput, any of 01–11, 16 |
 | `SWEEP_PODS` / `SWEEP_THREADS` / `SWEEP_IODEPTH` / `SWEEP_NCONNECT` / `SWEEP_DATASET_SIZE` | see "Sweeps" | the steps of a sweep | Defines the ladder; finer steps = a more precise maximum, more runs |
 
@@ -249,8 +246,7 @@ per thread, the volume size). See "Datasets" below.
 | `IOPS_COVER_MIN` | 20 | minutes the random IO of an IOPS test should need to go once through the dataset | After every IOPS test the runner prints the real time at the measured rate and warns below this, with the `DATASET_SIZE` needed |
 | `PVC_SIZE` | sized for the dataset | volume per daemon (xfs, raw block) | Existing volumes that are large enough are reused; smaller ones (or another StorageClass) are deleted and created again, and the dataset is prepared again |
 | `PREPARE` | auto | `auto`, `always`, `never` | `auto` writes the dataset once (again only when its size changes or more pods need it) |
-| `STORAGE_CACHE` | – | cache of the storage system, e.g. `512g` | Warns (or stops, `CACHE_CHECK=fail`) when the dataset < `CACHE_FACTOR` × cache |
-| `CACHE_FACTOR` / `CACHE_CHECK` | 2 / warn | | |
+| `STORAGE_CACHE` | – | cache of the storage system, e.g. `512g` | Warns when the dataset is smaller than 2 × the cache |
 | `BLOCKVARPCT` | – (100) | random share of every written block | 100 = incompressible (worst case), 50 ≈ 2:1 compressible, 0 = dedupable. Lower values make arrays with data reduction look faster |
 
 ### Client resources and measurement
@@ -260,10 +256,7 @@ per thread, the volume size). See "Datasets" below.
 | `CPU_SHARE` | 80 | share used by `CPU=auto` | Higher = more CPU for the pods, less for the rest of the node |
 | `CPU_LIMIT` | 0 | 1 = limit = request (Guaranteed, exclusive cores with the static CPU manager) | 1 avoids noisy neighbours; but CFS throttling then shows up as storage latency (the runner warns) |
 | `MEMORY` | – | memory request = limit per daemon | Needed for S3 throughput: `THREADS × IODEPTH × BS` per pod |
-| `CLIENT_CPU` / `CLIENT_CPU_MAX` | 1 / 80 | measure the daemons' CPU per phase; threshold for `CLIENT-LIMITED` | Lower threshold = stricter: fewer results accepted as storage results |
-| `LAT` | 1 | latency average + percentiles | 0 = no latency (and no target check) |
-| `LIVE` | 1 | a progress line every 5 s | 0 = quieter logs |
-| `AIO` / `AIO_MAX_THREADS` | auto / 1024 | async IO check and fallback (nfs, xfs, raw block) | See "Async IO blocked" |
+| `CLIENT_CPU_MAX` | 80 | % of its CPU above which a daemon makes the result `CLIENT-LIMITED` | Lower threshold = stricter: fewer results accepted as storage results |
 
 ### Deployment and operation
 | Key | Default | What it is | What changing it does |
@@ -273,10 +266,6 @@ per thread, the volume size). See "Datasets" below.
 | `KEEP` | 1 | keep the deployment after the test | 0 = remove it (and its volumes!) after the test: the next test prepares again |
 | `IMAGE_REPO` / `IMAGE_TAG` | chart default | | e.g. a mirror in an air-gapped cluster |
 | `HELM_ARGS` | – | extra helm args | e.g. `"--set tolerations[0].operator=Exists"` |
-| `DETACH` / `POLL` / `RECONNECT_TIMEOUT` | 1 / 5 / 3600 | run detached in the controller pod; poll interval; give up offline after | 0 = the run stops when kubectl loses the connection |
-| `WAIT_TIMEOUT` | 10m | how long to wait for the pods | |
-| `RESULTS_DIR` | benchmarks/results | where results are written | |
-| `CONTINUE` | 0 | run-suite.sh: continue after a failed test | |
 
 ### NFS ([nfs/profile.env](nfs/profile.env))
 | Key | Default | What it is | What changing it does |
@@ -287,7 +276,6 @@ per thread, the volume size). See "Datasets" below.
 | `NCONNECT` | 8 | TCP connections per mount (0 = off) | More connections = more parallel requests per node; vendors report ~3× for 4k reads from 1 to 8–16. Restarts the daemons |
 | `RSIZE` / `WSIZE` | 1048576 | max bytes per NFS READ/WRITE | 65536 can help small random IO; 1M is best for throughput. Measure both |
 | `NFS_EXTRA_OPTS` | hard | extra mount options | e.g. `hard,noatime,actimeo=0` |
-| `PVC_SIZE` | 500Gi | nominal (NFS does not enforce it) | – |
 
 ### XFS ([xfs/profile.env](xfs/profile.env)) and raw block ([raw-block/profile.env](raw-block/profile.env))
 | Key | Default | What it is | What changing it does |
@@ -305,6 +293,25 @@ per thread, the volume size). See "Datasets" below.
 | `BUCKET_PREFIX`, `BUCKETS` | elbencho, 4 | multi tests use `elbencho-1..4`, single `elbencho-single`, mixes `elbencho-mix` | More buckets spread the load if the system shards by bucket |
 | `OBJ_SIZE`, `DATASET_SIZE` | see "Datasets (all protocols)" | | |
 | `RANGE_BS` | `64k:1,1m:2,8m:1` | test 16: size of every ranged GET | |
+
+### Advanced (the defaults fit almost always)
+These work well as they are; change them only for the reason in the last column.
+| Key | Default | What it is | When to change it |
+|---|---|---|---|
+| `LAT_THREADS` / `LAT_IODEPTH` | 1 / 1 | load of test 10 | Only to see latency at a little more load; above 1 it is no longer single-request latency |
+| `MIN_GAIN` | 3 | % a step of test 17 must gain over the best so far | Higher = "saturated" sooner, fewer steps |
+| `FIND_STOP` | 1 (test 17), 0 (12) | stop a ladder at over-target / client-limited / 2 flat steps | 0 in test 17 = run the whole ladder anyway |
+| `CACHE_FACTOR` / `CACHE_CHECK` | 2 / warn | with `STORAGE_CACHE`: dataset must be ≥ factor × cache | `CACHE_CHECK=fail` stops before deploying, `off` silences it |
+| `LAT` | 1 | latency + percentiles | 0 only for runs where latency does not matter (no target check then) |
+| `CLIENT_CPU` | 1 | measure the daemons' CPU | 0 only if `kubectl exec` into the daemons is not allowed |
+| `LIVE` | 1 | a progress line every 5 s | 0 = quieter logs |
+| `AIO` / `AIO_MAX_THREADS` | auto / 1024 | async IO check and fallback (nfs, xfs, raw block) | `native` / `emulate` to force a mode; see "Async IO blocked" |
+| `PREP_THREADS` | 8 | threads per daemon that write the dataset | Higher if the first prepare is slow and the storage can take more |
+| `DETACH` / `POLL` / `RECONNECT_TIMEOUT` | 1 / 5 / 3600 | run detached in the controller pod; poll interval (s); give up after (s) offline | 0 = the run stops when kubectl loses the connection |
+| `WAIT_TIMEOUT` | 10m | how long to wait for the pods | Longer for slow image pulls or volume provisioning |
+| `RESULTS_DIR` | benchmarks/results | where results are written | |
+| `CONTINUE` | 0 | run-suite.sh: continue after a failed test | 1 for unattended suites |
+| `PVC_SIZE` (nfs) | 500Gi | nominal size of the NFS volume | Never: NFS does not enforce it |
 
 ## Latency targets
 
@@ -522,6 +529,33 @@ Or measure it, by sweeping the dataset size. The point where IOPS drop is where 
 
 Arrays with inline compression/dedup report very different numbers for the three settings, and the gap shows how
 much the array's data reduction contributes.
+
+## Metadata (test 11)
+
+Test 11 creates, reads the attributes of (stat / HEAD), lists (S3) and deletes many empty files or objects, and
+reports operations per second and their latency. It measures the metadata path of the storage, not its data path.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `META_FILES` | nfs, xfs: 10000; S3: 2000 | files / objects **per thread** (the same meaning on every protocol) |
+| `META_DIRS` | one directory per 1000 files | nfs, xfs only: directories per thread the files are spread over (files per directory are rounded up, e.g. 2500 files = 3 x 834) |
+| `THREADS` | 16 | threads per daemon; total files = `PODS × THREADS × META_FILES` |
+
+Without `META_DIRS` the runner spreads the files itself, so you only say how many files you want:
+```bash
+./benchmarks/nfs/11-metadata.sh $N PODS=4 META_FILES=10000
+#   -> 10 directories x 1000 files per thread; 4 pods x 16 threads x 10000 = 640,000 files in 640 directories
+```
+With `META_DIRS` you choose the directory layout, which changes what is measured:
+```bash
+./benchmarks/nfs/11-metadata.sh $N PODS=4 META_FILES=10000 META_DIRS=1
+#   -> 1 directory with 10000 files per thread: large directories. Shows how the storage handles many entries
+#      in one directory (directory locks, lookups in big directories): mail spools, image stores
+./benchmarks/nfs/11-metadata.sh $N PODS=4 META_FILES=10000 META_DIRS=1000
+#   -> 1000 directories with 10 files each: many small directories. More directory creates and deletes:
+#      source trees, build outputs, home directories
+```
+On S3 there are no directories: `META_FILES` objects per thread under one prefix, and `META_DIRS` is ignored.
 
 ## AI workloads (tests 14, 15)
 
