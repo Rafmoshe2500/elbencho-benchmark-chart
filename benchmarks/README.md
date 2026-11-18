@@ -15,6 +15,7 @@ On Windows, use WSL or Git Bash.
 ```
 benchmarks/
 ├── nfs/  xfs/  raw-block/  s3/      one folder per protocol
+│   ├── README.md                    every test of the protocol with its defaults and commands
 │   ├── profile.env                  protocol defaults (nconnect, StorageClass, endpoint, ...)
 │   └── 01-write-iops.sh ... 17-find-max.sh       (tests that don't apply to a protocol are not there)
 ├── run-suite.sh                     run several tests in a row
@@ -26,6 +27,9 @@ benchmarks/
 ```
 
 ## Examples: every kind of run
+
+Every protocol folder also has its own README with every test, its defaults and ready commands:
+[raw-block](raw-block/README.md) · [xfs](xfs/README.md) · [nfs](nfs/README.md) · [s3](s3/README.md).
 
 Every parameter is `KEY=VALUE`, as an argument or as an environment variable. Arguments win over the environment,
 and both win over `profile.env` and the test defaults. Every example works the same way on every protocol;
