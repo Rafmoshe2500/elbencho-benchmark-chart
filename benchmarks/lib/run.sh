@@ -640,9 +640,18 @@ eb_cmd() {
     "$S3_AUTH" "$hv" "$LIVE_FLAGS" "$PROTO/$TEST-$TNAME/$name" "$REMOTE_DIR" "$name" "$REMOTE_DIR" "$name" \
     "$extra" "$(printf '%q ' "$@")"
 }
+# The command as it runs (LAT flags, EXTRA_ARGS, BLOCKVARPCT included), without the bookkeeping options
+# (label, result files, live output). The S3 keys show as $ELBENCHO_S3 (names only, never values), so the
+# line can be pasted as it is into the controller pod.
+eb_show() {
+  local c=$1 s3='$ELBENCHO_S3'
+  [ -n "$S3_AUTH" ] && c=${c/"$S3_AUTH"/$s3}
+  c=${c/" $LIVE_FLAGS "/ }
+  printf '%s\n' "$c" | sed -E 's/ --(label|csvfile|resfile) [^ ]+//g; s/ +/ /g; s/ $//'
+}
 eb() {
   local name=$1 rc=0
-  log "phase '$name': elbencho ${*:4}"
+  log "phase '$name': $(eb_show "$(eb_cmd "$@")")"
   [ "$2" = 1 ] && cpu_begin elbencho
   ctl_run "$(eb_cmd "$@")" 2>&1 | tee -a "$RUN_DIR/console.log" || rc=$?
   [ "$2" = 1 ] && cpu_end "$name"
@@ -675,6 +684,8 @@ PAIR_RUN='both $(( $(date +%s) + DELAY )); st=$?; cat "$la" "$lb"; late && st=75
 eb_pair() {   # eb_pair <name-a> <cmd-a> <name-b> <cmd-b>   (names: the eb_cmd phase names)
   local na=$1 a=$2 nb=$3 b=$4 delay=$START_DELAY pre out setup what=connect try rc=0
   a=${a//\\\$S/\$S}; b=${b//\\\$S/\$S}   # let the remote shell expand the common start time
+  log "phase '$na': $(eb_show "$a")"
+  log "phase '$nb': $(eb_show "$b")"
   pre=$(printf 'D=%q NA=%q NB=%q\nra() { exec %s "$@"; }\nrb() { exec %s "$@"; }\n%s' \
         "$REMOTE_DIR" "$na" "$nb" "$a" "$b" "$PAIR_SH")
   if [ "$delay" = auto ]; then

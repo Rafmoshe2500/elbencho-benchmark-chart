@@ -227,7 +227,7 @@ IODEPTH` (S3 IOPS tests: `PODS × THREADS`).
 | `BS_MIX` | per test 05/06/07 | weighted sizes, e.g. `16k:2,64k:1` | Makes the mix look like a real application |
 | `READ_PCT` | 70 | read share in tests 05–07 | Higher = more reads; writes are usually the costlier side on flash with protection (RAID/EC/replication) |
 | `DURATION` | 300 (5 min, every test) | seconds per measured phase (every step of a sweep / find-max too) | Longer = steadier numbers; 1800 for flash steady state; shorter (60) for a quick look (garbage collection, write cache full) |
-| `EXTRA_ARGS` | – | extra elbencho args for the measured phase | Anything elbencho supports, e.g. `--lathisto` |
+| `EXTRA_ARGS` | – | extra elbencho args for the measured phases (not the dataset prepare). The `phase '...': elbencho ...` log line shows the full command with them, ready to paste into the controller pod | Anything elbencho supports, e.g. `--lathisto`, `--s3fastput --cpu` |
 
 ### Latency targets
 | Key | Default | What it is | What changing it does |
