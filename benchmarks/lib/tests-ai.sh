@@ -16,14 +16,6 @@ if [ $S3 = 1 ]; then AI_BUCKET="$BUCKET_PREFIX-ai"; BASE="$AI_BUCKET"; else BASE
 # Create directories on the shared volume (any daemon pod sees the same volume)
 pod_mkdir() { [ $S3 = 1 ] || $K exec "$FULL-0" -c elbencho -- mkdir -p "$@"; }
 
-# Run two elbencho commands (built with eb_cmd ... --start '$S') so that they start in the same second
-eb_concurrent() {
-  local a=${1//\\\$S/\$S} b=${2//\\\$S/\$S}
-  ctl_run "S=\$((\$(date +%s)+5)); ($a) > $REMOTE_DIR/c1.log 2>&1 & ($b) > $REMOTE_DIR/c2.log 2>&1 &
-       st=0; for j in \$(jobs -p); do wait \$j || st=1; done; cat $REMOTE_DIR/c1.log $REMOTE_DIR/c2.log; rm -f $REMOTE_DIR/c?.log; exit \$st" \
-    2>&1 | tee -a "$RUN_DIR/console.log"
-}
-
 ai_mkbucket() { [ $S3 = 1 ] || return 0; eb mkbucket 0 ELBENCHO_HOSTS -d -t 1 "$AI_BUCKET"; }   # idempotent
 
 # ============================================================== training ====
@@ -100,8 +92,8 @@ train_test() {
     # shellcheck disable=SC2046
     if [ $do_ck = 1 ] && [ "$CKPT_MODE" = async ]; then
       log "epoch $e: reading the dataset while checkpoint e$e is written in the background"
-      eb_concurrent "$(eb_cmd "train-e$e" 1 ELBENCHO_HOSTS "${rd[@]}" --start '$S' "$BASE")" \
-                    "$(eb_cmd "ckpt-e$e" 1 ELBENCHO_HOSTS_2 $(ck_args "$e") --start '$S')"
+      eb_pair "train-e$e" "$(eb_cmd "train-e$e" 1 ELBENCHO_HOSTS "${rd[@]}" --start '$S' "$BASE")" \
+              "ckpt-e$e"  "$(eb_cmd "ckpt-e$e" 1 ELBENCHO_HOSTS_2 $(ck_args "$e") --start '$S')"
     else
       log "epoch $e: reading the dataset"
       eb "train-e$e" 1 ELBENCHO_HOSTS "${rd[@]}" "$BASE"

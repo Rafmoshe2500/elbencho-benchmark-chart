@@ -89,14 +89,7 @@ mix_test() {
   local rd wr
   rd=$(eb_cmd mix-read 1 ELBENCHO_HOSTS -r --s3fastget -t "$rt" --treefile "$tree" -b "$maxb" --s3objprefix "$prefix/r/" "${TIMED[@]}" --start '$S' "$BUCKETS_PATH")
   wr=$(eb_cmd mix-write 1 ELBENCHO_HOSTS_2 -w -t "$wt" --treefile "$tree" -b "$maxb" --s3objprefix "$prefix/w/" "${TIMED[@]}" --start '$S' "$BUCKETS_PATH")
-  rd=${rd//\\\$S/\$S}; wr=${wr//\\\$S/\$S}   # let the remote shell expand the common start time
-  local rc=0
-  cpu_begin elbencho elbencho-2
-  ctl_run "S=\$((\$(date +%s)+5)); ($rd) > $REMOTE_DIR/mix-read.log 2>&1 & ($wr) > $REMOTE_DIR/mix-write.log 2>&1 &
-       st=0; for j in \$(jobs -p); do wait \$j || st=1; done; cat $REMOTE_DIR/mix-read.log $REMOTE_DIR/mix-write.log; exit \$st" \
-    2>&1 | tee -a "$RUN_DIR/console.log" || rc=$?
-  cpu_end mix-read mix-write
-  return $rc
+  eb_pair mix-read "$rd" mix-write "$wr"   # common start after the treefile reached every daemon
 }
 
 post_summary() {

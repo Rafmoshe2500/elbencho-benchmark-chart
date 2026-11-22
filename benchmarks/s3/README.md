@@ -94,7 +94,10 @@ Defaults: `BS_MIX=32k:1,64k:1,128k:1` `THREADS=20` (14 readers + 6 writers) `DAT
 ### 06 – 70/30 mix, small objects
 
 The same with objects of 1k, 2k and 4k.  
-Defaults: `BS_MIX=1k:1,2k:1,4k:1` `THREADS=20`.
+Defaults: `BS_MIX=1k:1,2k:1,4k:1` `THREADS=20`.  
+16g of small objects are ~7 million objects, so the treefile that elbencho uploads to every daemon is large. The runner
+times this upload with a dry run and starts readers and writers together only after it (see "How the 70/30 mixes work" in
+[../README.md](../README.md); `START_DELAY=<seconds>` to set the lead time by hand).
 
 ```bash
 ./benchmarks/s3/06-mix70-4k.sh $S PODS=4

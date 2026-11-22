@@ -145,6 +145,8 @@ command -v helm >/dev/null || die "helm not found"
                                #   native = no check, no fallback (fails if libaio is blocked)
 : "${AIO_MAX_THREADS:=1024}"   # cap for the emulated thread count
 : "${RECONNECT_TIMEOUT:=3600}" # give up after this many seconds without a working connection
+: "${START_DELAY:=auto}"       # two runs at once (S3 05-07, test 14 CKPT_MODE=async): seconds until their common
+                               # start. auto = time their setup with a dry run first (see eb_pair)
 
 # shellcheck disable=SC1090
 source "$BENCH_DIR/$PROTO/profile.env"
@@ -469,7 +471,7 @@ case "$SPREAD" in preferred|required|even|none) ;; *) die "SPREAD must be prefer
            RSIZE WSIZE NFS_EXTRA_OPTS S3_ENDPOINT S3_REGION BUCKET_PREFIX BUCKETS OBJ_SIZE OBJECTS \
            MIX_OBJECTS META_DIRS META_FILES EXTRA_ARGS SPREAD CPU CPU_LIMIT MEMORY \
            PODS_PER_NODE TOLERATE_ALL NODE_SELECTOR LAT_READ LAT_WRITE TPUT_LAT_FACTOR DATASET_SIZE IOPS_COVER_MIN \
-           DATASET_PODS DEV_SIZE STORAGE_CACHE CACHE_FACTOR BLOCKVARPCT DETACH AIO RANGE_BS; do
+           DATASET_PODS DEV_SIZE STORAGE_CACHE CACHE_FACTOR BLOCKVARPCT DETACH AIO RANGE_BS START_DELAY; do
     [ -n "${!v:-}" ] && printf '%s=%q\n' "$v" "${!v}"
   done
 } > "$RUN_DIR/params.env"
@@ -647,6 +649,56 @@ eb() {
   return $rc
 }
 
+# Two elbencho runs that start in the same second, each on its own service instance of every daemon
+# (S3 mixes: readers + writers; test 14: epoch reads + async checkpoint). Commands: eb_cmd ... --start '$S'.
+# elbencho checks --start only AFTER its setup: connecting to every daemon and, with --treefile, uploading the
+# treefile to every daemon, which parses it. With millions of objects in the treefile this takes longer than
+# any fixed lead time -> "Defined start time has already passed. Aborting." So a dry run of both commands (the
+# same setup, no I/O) times the setup first, and the common start is 2 x that + 10 s ahead (START_DELAY=<s>
+# skips the dry run). When one run fails (or misses the start), its partner is stopped: it must not run alone.
+# A missed start is retried with a longer lead time.
+PAIR_SH='la=$D/.$NA.log lb=$D/.$NB.log
+late() { grep -qs "start time has already passed" "$la" "$lb"; }
+both() {   # both <start time, 0 = none> [extra elbencho args]
+  S=$1; shift
+  ra "$@" > "$la" 2>&1 & pa=$!
+  rb "$@" > "$lb" 2>&1 & pb=$!
+  while kill -0 $pa 2>/dev/null && kill -0 $pb 2>/dev/null; do sleep 1; done
+  if kill -0 $pa 2>/dev/null; then p1=$pb p2=$pa; else p1=$pa p2=$pb; fi   # p1 ended first
+  st=0; wait $p1 || { st=1; kill -INT $p2 2>/dev/null; }   # elbencho then interrupts its services
+  wait $p2 || st=1
+  return $st
+}'
+PAIR_DRY='t0=$(date +%s); both 0 --dryrun; st=$?; [ $st = 0 ] || cat "$la" "$lb"
+echo "setup-seconds $(( $(date +%s) - t0 ))"; rm -f "$la" "$lb"; exit $st'
+PAIR_RUN='both $(( $(date +%s) + DELAY )); st=$?; cat "$la" "$lb"; late && st=75; rm -f "$la" "$lb"; exit $st'
+eb_pair() {   # eb_pair <name-a> <cmd-a> <name-b> <cmd-b>   (names: the eb_cmd phase names)
+  local na=$1 a=$2 nb=$3 b=$4 delay=$START_DELAY pre out setup what=connect try rc=0
+  a=${a//\\\$S/\$S}; b=${b//\\\$S/\$S}   # let the remote shell expand the common start time
+  pre=$(printf 'D=%q NA=%q NB=%q\nra() { exec %s "$@"; }\nrb() { exec %s "$@"; }\n%s' \
+        "$REMOTE_DIR" "$na" "$nb" "$a" "$b" "$PAIR_SH")
+  if [ "$delay" = auto ]; then
+    out=$(ctl_run "$pre"$'\n'"$PAIR_DRY") || { printf '%s\n' "$out" | tee -a "$RUN_DIR/console.log"; warn "dry run of '$na' + '$nb' failed"; return 1; }
+    setup=$(printf '%s\n' "$out" | awk '/^setup-seconds /{print $2}')
+    delay=$(( 2 * ${setup:-5} + 10 ))
+    [[ "$a$b" == *--treefile* ]] && what="connect + treefile upload to every daemon"
+    log "setup of both runs ($what) takes ${setup:-?}s -> common start in ${delay}s"
+  fi
+  case "$delay" in ''|*[!0-9]*) die "START_DELAY must be auto or a number of seconds" ;; esac
+  for try in 1 2 3; do
+    rc=0
+    cpu_begin elbencho elbencho-2
+    ctl_run "$pre"$'\n'"DELAY=$delay"$'\n'"$PAIR_RUN" 2>&1 | tee -a "$RUN_DIR/console.log" || rc=$?
+    [ "$rc" = 75 ] || { CPU_SKIP_S=$delay cpu_end "$na" "$nb"; return $rc; }
+    [ "$try" = 3 ] && break
+    delay=$(( 2 * delay + 10 ))
+    warn "a run was not ready at the common start (its setup took longer) - both again with ${delay}s lead time"
+    ctl "rm -f $REMOTE_DIR/$na.csv $REMOTE_DIR/$na.txt $REMOTE_DIR/$nb.csv $REMOTE_DIR/$nb.txt"
+  done
+  warn "the runs missed their common start 3 times - set START_DELAY=<seconds> (last lead time: ${delay}s)"
+  return $rc
+}
+
 # ------------------------------------------------ CPU used by the daemons ----
 # A saturated load generator looks exactly like slow storage: the result stops growing and the measured
 # latency rises. So the CPU time every daemon container used during a measured phase is read from its cgroup
@@ -680,9 +732,10 @@ cpu_end() {     # cpu_end <phase>...  -> <phase>.cpu: "avg_cores busiest_cores b
   # shellcheck disable=SC2086
   cpu_sample "$RUN_DIR/.cpu1" $CPU_CONTAINERS
   local st ph
-  st=$(awk -v req="$([ -n "$CPU" ] && to_milli "$CPU" || echo 0)" '
+  # CPU_SKIP_S: seconds of the window in which the daemons only waited (common start of eb_pair)
+  st=$(awk -v req="$([ -n "$CPU" ] && to_milli "$CPU" || echo 0)" -v skip="${CPU_SKIP_S:-0}" '
     FNR==NR { u[$1" "$2]=$3; t[$1" "$2]=$4; ns[$1" "$2]=$5; next }
-    ($1" "$2) in u { k=$1" "$2; dt=($5-ns[k])/1e9; if (dt<=0) next
+    ($1" "$2) in u { k=$1" "$2; dt=($5-ns[k])/1e9-skip; if (dt<=0) next
       cores[$1]+=($3-u[k])/1e6/dt; thr+=($4-t[k])/1e6; wall+=dt; np[$1]=$6; seen=1 }
     END { if (!seen) exit
       for (p in cores) { n++; sum+=cores[p]; if (cores[p]>=max) { max=cores[p]; av=(req>0 ? req/1000 : np[p]) } }

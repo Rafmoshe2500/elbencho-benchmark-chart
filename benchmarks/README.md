@@ -312,6 +312,7 @@ These work well as they are; change them only for the reason in the last column.
 | `AIO` / `AIO_MAX_THREADS` | auto / 1024 | async IO check and fallback (nfs, xfs, raw block) | `native` / `emulate` to force a mode; see "Async IO blocked" |
 | `PREP_THREADS` | 8 | threads per daemon that write the dataset | Higher if the first prepare is slow and the storage can take more |
 | `DETACH` / `POLL` / `RECONNECT_TIMEOUT` | 1 / 5 / 3600 | run detached in the controller pod; poll interval (s); give up after (s) offline | 0 = the run stops when kubectl loses the connection |
+| `START_DELAY` | auto | seconds until the common start of two runs at once (S3 05-07, test 14 with `CKPT_MODE=async`); auto = 2 × the setup time from a dry run + 10 s | Only if the dry run itself is a problem; see "How the 70/30 mixes work" |
 | `WAIT_TIMEOUT` | 10m | how long to wait for the pods | Longer for slow image pulls or volume provisioning |
 | `RESULTS_DIR` | benchmarks/results | where results are written | |
 | `CONTINUE` | 0 | run-suite.sh: continue after a failed test | 1 for unattended suites |
@@ -662,6 +663,15 @@ Files and Google Cloud:
   The chart runs two elbencho services per pod for this (ports 1611 and 1612). The summary prints the
   **combined** result and the real read share that was achieved. elbencho's custom tree mode supports only one
   bucket, so the mixes use the bucket `<BUCKET_PREFIX>-mix`.
+
+  **The common start.** elbencho checks `--start` only after its setup: it connects to every daemon and uploads the
+  treefile (one line per object, millions for test 06) to every daemon, which parses it. A fixed lead time of a few
+  seconds is not enough then (`Defined start time has already passed. Aborting.`). So the runner first times this
+  setup with a dry run of both commands (`--dryrun`: the same setup, no I/O), and sets the common start
+  2 × that + 10 s ahead (log: `setup of both runs ... takes 9s -> common start in 28s`). The waiting time is not
+  counted in the daemon CPU. If one run still misses the start, its partner is stopped - one half of a mix must not
+  run alone - and both are retried with a longer lead time (up to 3 times). `START_DELAY=<seconds>` sets the lead
+  time by hand and skips the dry run.
 
 ## Async IO blocked (`io_getevents failed ... Operation not permitted`)
 
