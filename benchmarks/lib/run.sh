@@ -130,6 +130,7 @@ command -v helm >/dev/null || die "helm not found"
 : "${EXTRA_ARGS:=}"            # extra elbencho args for the measured phases
 : "${HELM_ARGS:=}"             # extra helm args, e.g. "--set tolerations[0].operator=Exists"
 : "${RESULTS_DIR:=$BENCH_DIR/results}"
+[[ $TEST == 18 || $TEST == pgd ]] && : "${WAIT_TIMEOUT:=30m}"   # the matrix goes up to 1024 pods
 : "${WAIT_TIMEOUT:=10m}"
 : "${STORAGE_CACHE:=}"         # cache of the storage system (controllers DRAM/NVRAM + SSD cache), e.g. 512g
 : "${CACHE_FACTOR:=2}"         # the dataset should be at least CACHE_FACTOR x STORAGE_CACHE
@@ -181,6 +182,8 @@ case "$TEST" in
   14) TNAME=ai-training ;;         15) TNAME=ai-inference ;;
   16) TNAME=range-read ;;
   17) TNAME=find-max ;;
+  18) TNAME=put-get-delete-matrix ;;
+  pgd) TNAME=put-get-delete ;;      # one cell of test 18 (PODS, THREADS, OBJ_CLASS); test 18 runs it per cell
   deploy) TNAME=deploy ;;           # only deploy the daemons + controller, for elbencho runs by hand
   *) die "unknown test id '$TEST'" ;;
 esac
@@ -188,6 +191,7 @@ case "$TEST" in
   11) [ "$FAMILY" != block ] || die "test 11 (metadata) needs a filesystem - not available for raw-block" ;;
   14|15) [ "$PROTO" = nfs ] || [ "$PROTO" = s3 ] || die "tests 14/15 (AI) are for nfs and s3 (shared datasets)" ;;
   16) [ "$FAMILY" = s3 ] || die "test 16 (range reads in large objects) is for s3" ;;
+  18|pgd) [ "$FAMILY" = s3 ] || die "test 18 (PUT / GET / DELETE matrix) is for s3" ;;
 esac
 # AI tests: one dataset shared by all pods (like a real training cluster / inference fleet)
 LAYOUT=multi; [[ $TEST == 08 || $TEST == 09 || $TEST == 14 || $TEST == 15 ]] && LAYOUT=single
@@ -213,7 +217,146 @@ if [ "$FAMILY" = s3 ]; then
     03|04)       THREADS=${USER_THREADS:-16}; IODEPTH=${USER_IODEPTH:-1}; BS=${USER_BS:-16m}; : "${OBJ_SIZE:=256m}" ;;
     05|06|07)    THREADS=${USER_THREADS:-20} ;;
     16)          THREADS=${USER_THREADS:-16}; IODEPTH=${USER_IODEPTH:-1}; : "${OBJ_SIZE:=256m}" ;;
+    pgd)         THREADS=${USER_THREADS:-8}; IODEPTH=1; : "${OBJ_CLASS:=large}"
+                 case "$OBJ_CLASS" in large|small) ;; *) die "OBJ_CLASS must be large or small, got '$OBJ_CLASS'" ;; esac
+                 [ "$LAT" = 1 ] || { warn "test 18 measures latency: LAT=1"; LAT=1; } ;;
   esac
+fi
+
+# ----------------------------------------- S3 PUT / GET / DELETE matrix (18) ---
+# Every cell of PODS x THREADS x object class runs three tests on one set of objects: PUT (every object once),
+# GET (every object once), DELETE (every object once). Object sizes are uniformly random within the range of
+# the class; one object = one S3 request (multipart parts must be >= 5 MiB, so a 1-4 MiB "block" is the whole
+# object). Objects per cell = <class>_OBJS per thread x PODS x THREADS, at least <class>_MIN, at most
+# <class>_MAX (and at least one per thread).
+: "${MATRIX_LARGE:=1m-4m}"        # object size range of the "large" class
+: "${MATRIX_SMALL:=3k-4k}"        # object size range of the "small" class
+: "${MATRIX_LARGE_OBJS:=10}";  : "${MATRIX_LARGE_MIN:=500}";  : "${MATRIX_LARGE_MAX:=100000}"
+: "${MATRIX_SMALL_OBJS:=50}";  : "${MATRIX_SMALL_MIN:=5000}"; : "${MATRIX_SMALL_MAX:=300000}"
+pgd_range() {   # pgd_range <large|small> -> "min max" object size in bytes
+  local r lo hi
+  case "$1" in large) r=$MATRIX_LARGE ;; small) r=$MATRIX_SMALL ;; *) die "object class must be large or small, got '$1'" ;; esac
+  [[ $r =~ ^[0-9.]+[kKmMgG]?[iI]?[bB]?-[0-9.]+[kKmMgG]?[iI]?[bB]?$ ]] || die "object size range must be <min>-<max>, e.g. 1m-4m, got '$r'"
+  lo=$(to_bytes "${r%%-*}"); hi=$(to_bytes "${r#*-}")
+  [ "$lo" -ge 1 ] && [ "$hi" -ge "$lo" ] || die "object size range '$r': min must be >= 1 byte and <= max"
+  echo "$lo $hi"
+}
+pgd_objects() {   # pgd_objects <large|small> <pods> <threads> -> objects of the cell
+  local per min max w f
+  case "$1" in
+    large) per=$MATRIX_LARGE_OBJS min=$MATRIX_LARGE_MIN max=$MATRIX_LARGE_MAX ;;
+    small) per=$MATRIX_SMALL_OBJS min=$MATRIX_SMALL_MIN max=$MATRIX_SMALL_MAX ;;
+  esac
+  w=$(( $2 * $3 )); f=$(( w * per ))
+  [ "$f" -ge "$min" ] || f=$min; [ "$f" -le "$max" ] || f=$max; [ "$f" -ge "$w" ] || f=$w
+  echo "$f"
+}
+# One row per test (= operation of a cell) in the matrix CSV. Latencies in ms:
+#   lat_*   per object, the whole operation as the application sees it (elbencho "Objects latency")
+#   clat_*  per S3 request: completion latency from sending the request to the end of the response (elbencho
+#           "IO latency"; DELETE has one request per object and elbencho measures it once: clat = lat)
+#   storage_lat_*  the storage system's own latency (STORAGE_LAT_CMD or Prometheus, see README); empty if not set
+#   client_cpu_util_pct  CPU use of the load generator nodes during the phase (elbencho --cpu, /proc/stat)
+#   pod_cpu_*  CPU the elbencho containers used themselves (cgroup counters, see cpu_end)
+MATRIX_HDR="test_no,matrix_id,operation,size_class,object_size_range,pods,threads_per_pod,total_threads,objects,total_mib,avg_object_kib,elapsed_s,ops_per_s,mib_per_s,lat_avg_ms,lat_min_ms,lat_max_ms,lat_p50_ms,lat_p90_ms,lat_p99_ms,lat_p99_9_ms,clat_avg_ms,clat_min_ms,clat_max_ms,clat_p50_ms,clat_p90_ms,clat_p99_ms,clat_p99_9_ms,storage_lat_avg_ms,storage_lat_p50_ms,storage_lat_p90_ms,storage_lat_p99_ms,client_cpu_util_pct,pod_cpu_avg_cores,pod_cpu_busiest_cores,pod_cpu_busiest_pct,pod_cpu_throttled_pct,verdict,start_utc,end_utc,run_dir"
+matrix_row() {   # matrix_row key=value ... -> one CSV line in MATRIX_HDR order (missing keys stay empty)
+  awk -v hdr="$MATRIX_HDR" 'BEGIN { for (i = 1; i < ARGC; i++) { k = ARGV[i]; sub(/=.*/, "", k); val[k] = substr(ARGV[i], length(k) + 2) }
+    n = split(hdr, h, ","); for (i = 1; i <= n; i++) printf "%s%s", (i > 1 ? "," : ""), val[h[i]]; printf "\n" }' "$@"
+}
+
+if [ "$TEST" = 18 ]; then
+  : "${MATRIX_PODS:=1 4 16 64 256 1024}"
+  : "${MATRIX_THREADS:=1 2 4 8 16 32}"
+  : "${MATRIX_SIZES:=large small}"
+  : "${CONTINUE:=1}"             # 1 = go on with the next cell after a failed one (its rows say "failed")
+  mkdir -p "$RESULTS_DIR"
+  if [ -n "${MATRIX_RESUME:-}" ]; then
+    MATRIX_ID=$(basename "${MATRIX_RESUME%.csv}")
+    [ -f "$RESULTS_DIR/$MATRIX_ID.csv" ] && [ -f "$RESULTS_DIR/$MATRIX_ID.grid" ] || die "MATRIX_RESUME: $RESULTS_DIR/$MATRIX_ID.csv / .grid not found"
+    # shellcheck disable=SC1090
+    source "$RESULTS_DIR/$MATRIX_ID.grid"   # the grid of the first run: the test numbers depend on it
+    log "resuming $MATRIX_ID: cells with all three results are skipped, the others run (again)"
+  else
+    MATRIX_ID=matrix-$(date +%Y%m%d-%H%M%S)${MATRIX_TAG:+-$MATRIX_TAG}
+  fi
+  for x in $MATRIX_PODS $MATRIX_THREADS; do [ "$x" -ge 1 ] 2>/dev/null || die "MATRIX_PODS / MATRIX_THREADS must be numbers >= 1, got '$x'"; done
+  for x in $MATRIX_SIZES; do pgd_range "$x" >/dev/null; done
+  for v in MATRIX_LARGE_OBJS MATRIX_LARGE_MIN MATRIX_LARGE_MAX MATRIX_SMALL_OBJS MATRIX_SMALL_MIN MATRIX_SMALL_MAX; do
+    [ "${!v}" -ge 1 ] 2>/dev/null || die "$v must be a number >= 1, got '${!v}'"
+  done
+  MATRIX_CSV="$RESULTS_DIR/$MATRIX_ID.csv"
+  export MATRIX_LARGE MATRIX_SMALL MATRIX_LARGE_OBJS MATRIX_LARGE_MIN MATRIX_LARGE_MAX MATRIX_SMALL_OBJS MATRIX_SMALL_MIN MATRIX_SMALL_MAX
+  if [ -z "${MATRIX_RESUME:-}" ]; then
+    for v in MATRIX_PODS MATRIX_THREADS MATRIX_SIZES MATRIX_LARGE MATRIX_SMALL MATRIX_LARGE_OBJS MATRIX_LARGE_MIN \
+             MATRIX_LARGE_MAX MATRIX_SMALL_OBJS MATRIX_SMALL_MIN MATRIX_SMALL_MAX; do printf '%s=%q\n' "$v" "${!v}"; done > "$RESULTS_DIR/$MATRIX_ID.grid"
+    echo "$MATRIX_HDR" > "$MATRIX_CSV"
+  fi
+  ncell=0; for p in $MATRIX_PODS; do for s in $MATRIX_SIZES; do for t in $MATRIX_THREADS; do ncell=$((ncell + 1)); done; done; done
+  total=$((ncell * 3))
+  # the plan: objects and data per cell. elbencho uploads the object list (treefile) to every pod before each
+  # phase, so its size x PODS is what the controller pod sends 3 times per cell
+  {
+    printf '%-9s %-6s %5s %7s %8s %9s %10s %18s\n' tests class pods threads objects obj/thr data "treefile x pods"
+    n=0; tobj=0; tdata=0
+    for p in $MATRIX_PODS; do for s in $MATRIX_SIZES; do
+      read -r lo hi <<< "$(pgd_range "$s")"
+      for t in $MATRIX_THREADS; do
+        f=$(pgd_objects "$s" "$p" "$t"); d=$(( f * (lo + hi) / 2 )); tobj=$((tobj + f)); tdata=$((tdata + d))
+        printf '%-9s %-6s %5s %7s %8s %9s %10s %18s\n' "$((n + 1))-$((n + 3))" "$s" "$p" "$t" "$f" "$((f / (p * t)))" \
+          "$(hr "$d")" "$(hr $((f * 24))) x $p"
+        n=$((n + 3))
+      done
+    done; done
+    echo "$total tests ($ncell cells x PUT / GET / DELETE): $tobj objects, $(hr "$tdata") written in total (each cell deletes its objects)."
+    echo "Sizes: large = $MATRIX_LARGE, small = $MATRIX_SMALL (uniformly random per object; one object = one request)."
+  } | tee "$RESULTS_DIR/$MATRIX_ID.plan"
+  [ "${MATRIX_PLAN:-0}" = 1 ] && { log "MATRIX_PLAN=1: plan only, nothing was run"; exit 0; }
+  cell_rows() { awk -F, -v a="$1" 'NR > 1 && $1 > a && $1 <= a + 3' "$MATRIX_CSV"; }   # the 3 rows of the cell after test a
+  n=0; nfail=0
+  for p in $MATRIX_PODS; do for s in $MATRIX_SIZES; do for t in $MATRIX_THREADS; do
+    base=$n; n=$((n + 3))
+    if [ -n "${MATRIX_RESUME:-}" ]; then
+      rows=$(cell_rows "$base")
+      if [ "$(printf '%s\n' "$rows" | grep -c .)" = 3 ] && ! printf '%s\n' "$rows" | grep -q ',failed,'; then continue; fi
+      awk -F, -v a="$base" 'NR == 1 || !($1 > a && $1 <= a + 3)' "$MATRIX_CSV" > "$MATRIX_CSV.tmp" && mv "$MATRIX_CSV.tmp" "$MATRIX_CSV"
+    fi
+    log "matrix: tests $((base + 1))-$((base + 3)) of $total: PUT / GET / DELETE of $s objects ($(
+      [ "$s" = large ] && echo "$MATRIX_LARGE" || echo "$MATRIX_SMALL")), PODS=$p THREADS=$t"
+    rc=0
+    "$0" "$PROTO" pgd PODS="$p" THREADS="$t" OBJ_CLASS="$s" MATRIX_ID="$MATRIX_ID" MATRIX_CSV="$MATRIX_CSV" \
+      MATRIX_SEQ="$base" KEEP=1 || rc=$?
+    k=0
+    for op in PUT GET DELETE; do   # a cell that died before its rows were written: "failed" rows
+      k=$((k + 1))
+      awk -F, -v x=$((base + k)) 'NR > 1 && $1 == x { f = 1 } END { exit !f }' "$MATRIX_CSV" && continue
+      matrix_row test_no=$((base + k)) matrix_id="$MATRIX_ID" operation=$op size_class="$s" pods="$p" threads_per_pod="$t" \
+        object_size_range="$([ "$s" = large ] && echo "$MATRIX_LARGE" || echo "$MATRIX_SMALL")" total_threads=$((p * t)) verdict=failed >> "$MATRIX_CSV"
+    done
+    if [ "$rc" != 0 ]; then
+      nfail=$((nfail + 1)); warn "matrix: cell PODS=$p THREADS=$t $s failed (exit $rc)"
+      [ "$CONTINUE" = 1 ] || { warn "CONTINUE=0: stopping the matrix"; break 3; }
+    fi
+  done; done; done
+  # results in run order (test_no), one line per test
+  sort -t, -k1,1n "$MATRIX_CSV" | awk 'NR == 1 || $0 !~ /^test_no,/' > "$MATRIX_CSV.tmp" && mv "$MATRIX_CSV.tmp" "$MATRIX_CSV"
+  {
+    awk -F, 'NR == 1 { for (i = 1; i <= NF; i++) h[$i] = i
+        printf "%-5s %-6s %-5s %5s %4s %10s %8s %9s %9s %9s %9s %9s %8s %5s  %s\n", "test", "op", "class", "pods", "thr", "ops/s", "MiB/s", "lat_avg", "lat_p50", "lat_p90", "lat_p99", "clat_p99", "stor_avg", "cpu%", "verdict"; next }
+      function f(k) { return ($(h[k]) == "") ? "-" : $(h[k]) }
+      { printf "%-5s %-6s %-5s %5s %4s %10s %8s %9s %9s %9s %9s %9s %8s %5s  %s\n", f("test_no"), f("operation"), f("size_class"), f("pods"),
+          f("threads_per_pod"), f("ops_per_s"), f("mib_per_s"), f("lat_avg_ms"), f("lat_p50_ms"), f("lat_p90_ms"), f("lat_p99_ms"),
+          f("clat_p99_ms"), f("storage_lat_avg_ms"), f("pod_cpu_busiest_pct"), f("verdict") }' "$MATRIX_CSV"
+    echo "(latencies in ms; cpu% = busiest load generator pod)"
+    [ "$nfail" = 0 ] || echo "$nfail cell(s) failed: rerun only those with MATRIX_RESUME=$MATRIX_ID"
+  } | tee "$RESULTS_DIR/$MATRIX_ID.txt"
+  log "matrix CSV: $MATRIX_CSV"
+  if [ "${KEEP:-1}" = 1 ]; then
+    log "the daemons stay deployed (KEEP=1); remove them with: ./benchmarks/cleanup.sh s3"
+  else
+    "$BENCH_DIR/cleanup.sh" "$PROTO" "RELEASES=$RELEASE_PREFIX-s3" "NAMESPACE=$NAMESPACE" >/dev/null
+  fi
+  [ "$nfail" = 0 ] || exit 1
+  exit 0
 fi
 : "${DURATION:=300}"           # seconds per timed phase (5 min: past write caches, steadier numbers)
 
@@ -410,6 +553,10 @@ size_dataset() {
     case "$TEST" in
       01|02|08|09|05|06|07) : "${DATASET_SIZE:=16g}" ;;
       03|04|16)             : "${DATASET_SIZE:=4t}" ;;
+      pgd) local lo hi; read -r lo hi <<< "$(pgd_range "$OBJ_CLASS")"
+           PGD_OBJECTS=$(pgd_objects "$OBJ_CLASS" "$PODS" "$THREADS")
+           log "dataset: $PGD_OBJECTS $OBJ_CLASS objects of $(hr "$lo") - $(hr "$hi") (random), ~$(hr $(( PGD_OBJECTS * (lo + hi) / 2 ))), $(( PGD_OBJECTS / (PODS * THREADS) )) per thread"
+           return 0 ;;
       *) return 0 ;;
     esac
     total=$(to_bytes "$DATASET_SIZE")
@@ -471,7 +618,8 @@ case "$SPREAD" in preferred|required|even|none) ;; *) die "SPREAD must be prefer
            RSIZE WSIZE NFS_EXTRA_OPTS S3_ENDPOINT S3_REGION BUCKET_PREFIX BUCKETS OBJ_SIZE OBJECTS \
            MIX_OBJECTS META_DIRS META_FILES EXTRA_ARGS SPREAD CPU CPU_LIMIT MEMORY \
            PODS_PER_NODE TOLERATE_ALL NODE_SELECTOR LAT_READ LAT_WRITE TPUT_LAT_FACTOR DATASET_SIZE IOPS_COVER_MIN \
-           DATASET_PODS DEV_SIZE STORAGE_CACHE CACHE_FACTOR BLOCKVARPCT DETACH AIO RANGE_BS START_DELAY; do
+           DATASET_PODS DEV_SIZE STORAGE_CACHE CACHE_FACTOR BLOCKVARPCT DETACH AIO RANGE_BS START_DELAY \
+           OBJ_CLASS PGD_OBJECTS MATRIX_ID MATRIX_SEQ MATRIX_LARGE MATRIX_SMALL; do
     [ -n "${!v:-}" ] && printf '%s=%q\n' "$v" "${!v}"
   done
 } > "$RUN_DIR/params.env"
@@ -578,7 +726,8 @@ restart_daemons_at_once() {
 # a second instance) for "GET /status" from the controller pod, all in parallel, and sorts the failures by
 # cause. A pod is "Ready" when the kubelet on its OWN node reaches the port, so ready-but-unreachable means
 # the network between the controller and that pod blocks it.
-HOST_PROBE='for h in ${ELBENCHO_HOSTS//,/ } ${ELBENCHO_HOSTS_2//,/ }; do
+HOST_PROBE='k=0; for h in ${ELBENCHO_HOSTS//,/ } ${ELBENCHO_HOSTS_2//,/ }; do
+  k=$((k + 1)); [ $((k % 128)) = 0 ] && wait   # at most 128 probes at once (process limit of the pod)
   ( n=${h%:*}; p=${h##*:}
     r=$(timeout 5 bash -c "exec 3<>/dev/tcp/$n/$p && printf \"GET /status HTTP/1.0\r\n\r\n\" >&3 && head -c 12 <&3" 2>&1); rc=$?
     case "$r" in
@@ -774,10 +923,13 @@ CPU_PROBE='u=; t=0; s=/sys/fs/cgroup/cpu.stat
 if grep -q usage_usec $s 2>/dev/null; then u=$(awk "/^usage_usec/{print \$2}" $s); t=$(awk "/^throttled_usec/{print \$2}" $s)
 else for f in /sys/fs/cgroup/cpuacct/cpuacct.usage /sys/fs/cgroup/cpu,cpuacct/cpuacct.usage; do [ -r $f ] && { u=$(($(cat $f)/1000)); break; }; done; fi
 [ -n "$u" ] && echo "$u ${t:-0} $(date +%s%N) $(nproc)"'
+: "${CPU_SAMPLE_PODS:=64}"   # with more pods, the CPU of this many pods (evenly spread) is sampled
 cpu_sample() {   # cpu_sample <outfile> <container>...
-  local out=$1 i c n=0; shift
+  local out=$1 i c n=0 idx; shift
   : > "$out"
-  for i in $(seq 0 $((PODS - 1))); do
+  idx=$(seq 0 $((PODS - 1)))
+  [ "$PODS" -le "$CPU_SAMPLE_PODS" ] || idx=$(awk -v p="$PODS" -v k="$CPU_SAMPLE_PODS" 'BEGIN { for (j = 0; j < k; j++) print int(j * p / k) }')
+  for i in $idx; do
     for c in "$@"; do
       { r=$($K exec "$FULL-$i" -c "$c" -- sh -c "$CPU_PROBE" 2>/dev/null) && [ -n "$r" ] && echo "$i $c $r" >> "$out"; } &
       n=$((n + 1)); [ $((n % 16)) = 0 ] && wait
@@ -811,7 +963,8 @@ cpu_end() {     # cpu_end <phase>...  -> <phase>.cpu: "avg_cores busiest_cores b
   for ph in "$@"; do echo "$st" > "$RUN_DIR/$ph.cpu"; done
   # shellcheck disable=SC2086
   set -- $st
-  log "daemon CPU: average $1 cores per pod, busiest pod $2 of $5 cores ($3%)$([ "$4" -gt 0 ] && echo ", throttled $4% of the time")"
+  log "daemon CPU: average $1 cores per pod, busiest pod $2 of $5 cores ($3%)$([ "$4" -gt 0 ] && echo ", throttled $4% of the time")$(
+    [ "$PODS" -gt "$CPU_SAMPLE_PODS" ] && echo " ($CPU_SAMPLE_PODS of $PODS pods sampled)")"
   if [ "$3" -ge "$CLIENT_CPU_MAX" ]; then
     warn "CLIENT-LIMITED: the busiest daemon used $3% of its CPU. This result measures the load generators, not the storage - add PODS or CPU instead of threads"
   elif [ "$4" -ge 5 ]; then
@@ -1044,5 +1197,7 @@ EOT
   exit 0
 fi
 aio_preflight
+RUN_FAILED=""   # set by a test that keeps going after a failed phase, so that finish() still saves the others
 run_test
 finish
+[ -z "$RUN_FAILED" ] || die "phase '$RUN_FAILED' failed (see above); the results of the other phases are saved"

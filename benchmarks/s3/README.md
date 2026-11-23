@@ -1,6 +1,6 @@
 # S3 object storage: how to run every test
 
-No volumes: the daemons get the endpoint and the keys from a Secret. The multi tests spread the load over `BUCKETS` (4) buckets `elbencho-1..4`, the single tests use `elbencho-single`, the mixes `elbencho-mix`, the AI tests `elbencho-ai`. "IOPS" on S3 = object requests per second.
+No volumes: the daemons get the endpoint and the keys from a Secret. The multi tests spread the load over `BUCKETS` (4) buckets `elbencho-1..4`, the single tests use `elbencho-single`, the mixes `elbencho-mix`, the AI tests `elbencho-ai`, the matrix (18) `elbencho-matrix`. "IOPS" on S3 = object requests per second.
 
 All variables, what they change, and the background are in [../README.md](../README.md). Every value is `KEY=VALUE`,
 as an argument or an environment variable; arguments win.
@@ -197,6 +197,96 @@ the latency target is missed, when two steps gain less than 3%, or when the pods
 ./benchmarks/s3/17-find-max.sh $S SWEEP_TEST=04     # max read throughput
 ./benchmarks/s3/17-find-max.sh $S SWEEP_TEST=02 LAT_READ=1/3 DURATION=120     # own target, 2-min steps
 ./benchmarks/s3/17-find-max.sh $S SWEEP_TEST=02 PODS_PER_NODE=2 SWEEP_THREADS="64 128 256 512"   # pods were CPU-bound
+```
+
+### 18 – PUT / GET / DELETE matrix (216 tests, one CSV)
+
+Runs every combination of
+
+| | Default | Change with |
+|---|---|---|
+| pods (load generators) | `1 4 16 64 256 1024` | `MATRIX_PODS="1 4 16"` |
+| threads per pod | `1 2 4 8 16 32` | `MATRIX_THREADS="1 8 32"` |
+| object class | `large small` | `MATRIX_SIZES=small` |
+| operation | PUT, GET, DELETE | – |
+
+= 6 × 6 × 2 cells × 3 operations = **216 tests in a row**, and writes one row per test to
+`benchmarks/results/matrix-<date>.csv` (plus a table in `matrix-<date>.txt`).
+
+**Objects.** `large` = objects of a random size between 1 MiB and 4 MiB (`MATRIX_LARGE=1m-4m`), `small` = between
+3 KiB and 4 KiB (`MATRIX_SMALL=3k-4k`), uniformly random per object. Every object is one S3 request, so the "block"
+is the object itself (multipart parts must be at least 5 MiB, so a 1–4 MiB block can only be a whole object).
+Every cell writes its own set of objects (PUT, each object once), reads all of them (GET, each once) and deletes
+all of them (DELETE, each once) under its own key prefix in the bucket `<BUCKET_PREFIX>-matrix`. The phases run
+until every object is done (no time limit), so the number of objects sets the length of a phase:
+
+| | Objects per thread | At least (per cell) | At most (per cell) |
+|---|---|---|---|
+| large | `MATRIX_LARGE_OBJS=10` | `MATRIX_LARGE_MIN=500` | `MATRIX_LARGE_MAX=100000` |
+| small | `MATRIX_SMALL_OBJS=50` | `MATRIX_SMALL_MIN=5000` | `MATRIX_SMALL_MAX=300000` |
+
+and never less than one object per thread. With the defaults the whole matrix writes ~2.9 million objects,
+~1.4 TiB (each cell deletes its objects again; the largest cell holds ~244 GiB). `MATRIX_PLAN=1` prints the
+objects and data of every cell without running anything. The sizes come from an object list (elbencho custom tree
+mode) that elbencho uploads to every pod before a phase; at 1024 pods and 300,000 objects that is ~7 MiB per pod.
+
+```bash
+./benchmarks/s3/18-put-get-delete-matrix.sh $S MATRIX_PLAN=1                   # the plan only
+./benchmarks/s3/18-put-get-delete-matrix.sh $S                                 # all 216 tests
+./benchmarks/s3/18-put-get-delete-matrix.sh $S MATRIX_PODS="1 4 16" MATRIX_THREADS="1 4 16"   # a smaller grid
+./benchmarks/s3/18-put-get-delete-matrix.sh $S MATRIX_SMALL_OBJS=200 MATRIX_LARGE_MAX=20000   # longer small / shorter large phases
+./benchmarks/s3/18-put-get-delete-matrix.sh $S MATRIX_RESUME=matrix-20261123-101500           # go on after an interruption
+```
+
+The order is pods (1 → 1024), then class, then threads, so that the StatefulSet only grows 6 times. A failed cell
+gets `failed` rows and the matrix goes on (`CONTINUE=0` stops it); its objects are deleted. `MATRIX_RESUME=<id>`
+reruns the same grid (from `matrix-<id>.grid`) and only the cells without three good rows. 1024 pods need a cluster
+that can schedule them (pod count per node, IPs); the rollout wait is 30 minutes for this test (`WAIT_TIMEOUT`). The
+pods stay deployed at the end (`./benchmarks/cleanup.sh s3`, or `KEEP=0`).
+
+**The CSV.** One row per test, latencies in ms:
+
+| Column | Meaning |
+|---|---|
+| `test_no`, `operation`, `size_class`, `object_size_range`, `pods`, `threads_per_pod`, `total_threads` | which test |
+| `objects`, `total_mib`, `avg_object_kib`, `elapsed_s`, `ops_per_s`, `mib_per_s` | work done and rate (all objects / time until the last thread finished) |
+| `lat_avg/min/max_ms`, `lat_p50/p90/p99/p99_9_ms` | **total latency per object** as the application sees it (elbencho "Objects latency": the whole PUT / GET / DELETE of one object, client overhead included) |
+| `clat_avg/min/max_ms`, `clat_p50/p90/p99/p99_9_ms` | **completion latency per S3 request**: from sending the request until the response is complete (elbencho "IO latency"). With one request per object it is almost equal to `lat`; the difference is client-side work. DELETE is measured once per object: `clat = lat` |
+| `storage_lat_avg/p50/p90/p99_ms` | **latency measured by the storage system itself**, from its metrics (see below); empty if not configured |
+| `client_cpu_util_pct` | CPU use of the load generator **nodes** during the phase, average over the pods (elbencho `--cpu`, from `/proc/stat`: the whole node) |
+| `pod_cpu_avg_cores`, `pod_cpu_busiest_cores`, `pod_cpu_busiest_pct`, `pod_cpu_throttled_pct` | CPU the elbencho containers used themselves (cgroup counters; with more than 64 pods, 64 of them are sampled: `CPU_SAMPLE_PODS`) |
+| `verdict` | `ok`, `CLIENT-LIMITED` (the busiest pod used >= `CLIENT_CPU_MAX` % of its CPU: that row measures the load generators, not the storage), `failed` |
+| `start_utc`, `end_utc`, `run_dir` | when the phase ran, and its folder (elbencho result files with the full latency histograms) |
+
+p50 / p90 / p99 come from elbencho's latency histogram (`--lathisto`) the same way elbencho computes its own
+percentiles (upper bound of the histogram bucket); elbencho prints p50 and p99 itself but no p90.
+
+**Latency on the storage side.** A client can only measure the time a request took including the network. The
+storage system's own view comes from its metrics, so it is optional:
+
+- `PROM_URL` (+ `PROM_TOKEN` for a bearer token, `PROM_INSECURE=1` for a self-signed certificate): a Prometheus
+  (or Thanos) that scrapes the storage system, reachable from your machine (e.g. `kubectl port-forward`; needs
+  `curl`). `PROM_Q_AVG`, `PROM_Q_P50`, `PROM_Q_P90`, `PROM_Q_P99` are PromQL queries with placeholders, evaluated
+  for the window of each phase: `%API%` = `PutObject` / `GetObject` / `DeleteObject`, `%api%` = the same in lower
+  case, `%op%` = `put` / `get` / `del`, `%range%` = the length of the window (e.g. `95s`). The result is in seconds
+  (`PROM_UNIT=ms` / `us` otherwise). Leave out what your system has no metric for.
+- `STORAGE_LAT_CMD`: any command instead (a vendor CLI, a REST call); it gets `OP`, `S3_API`, `START_EPOCH`,
+  `END_EPOCH`, `PODS`, `THREADS`, `OBJ_CLASS` in the environment and prints `avg p50 p90 p99` in ms (`-` = none).
+- `STORAGE_LAT_WAIT=30`: seconds to wait after a cell before asking (the metrics are scraped with a delay); the
+  window of a phase is its start until its end + this wait. Phases shorter than two scrape intervals give no value.
+
+The metric names differ between products and versions: check them on your system's `/metrics` first. Examples:
+
+```bash
+# Ceph RGW (ceph-exporter): only averages exist (per-op latency sum / count)
+PROM_Q_AVG='sum(increase(ceph_rgw_op_%op%_obj_lat_sum[%range%])) / sum(increase(ceph_rgw_op_%op%_obj_lat_count[%range%]))'
+# MinIO / AIStor metrics v3: time to first byte as a histogram, per API
+PROM_Q_P50='histogram_quantile(0.5, sum by (le) (increase(minio_api_requests_ttfb_seconds_distribution{name="%API%"}[%range%])))'
+PROM_Q_P90='histogram_quantile(0.9, sum by (le) (increase(minio_api_requests_ttfb_seconds_distribution{name="%API%"}[%range%])))'
+PROM_Q_P99='histogram_quantile(0.99, sum by (le) (increase(minio_api_requests_ttfb_seconds_distribution{name="%API%"}[%range%])))'
+
+kubectl -n monitoring port-forward svc/prometheus-operated 9090 &
+./benchmarks/s3/18-put-get-delete-matrix.sh $S PROM_URL=http://localhost:9090 PROM_Q_AVG="$PROM_Q_AVG" PROM_Q_P99="$PROM_Q_P99"
 ```
 
 ### 12 – Sweeps: one value at several steps, one table

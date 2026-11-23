@@ -818,6 +818,7 @@ kubectl -n elbencho-bench create secret generic s3-creds \
         <tr><td class="n">15</td><td>AI Inference</td><td>טעינת מודל, lookups, KV-cache</td><td><span class="tag">16g model · 16m ranges</span></td><td class="args">--nosvcshare -r · --rwmixthr</td></tr>
         <tr><td class="n">16</td><td>Range reads</td><td>GETs של טווחים במיקומים רנדומליים בתוך אובייקטים גדולים (Parquet/ORC ב-Trino/Spark)</td><td><span class="tag">256m objects · 64k:1,1m:2,8m:1</span></td><td class="args">-r --s3randobj -b RANGE_BS</td></tr>
         <tr><td class="n">17</td><td>Find max</td><td>עומס שגדל עד יעד ה-latency, עד רוויה, או עד שהפודים נחנקים</td><td><span class="tag">PODS=auto · 8→256 thr · 30/90ms</span></td><td class="args">SWEEP_TEST SWEEP_THREADS LAT_READ LAT_WRITE</td></tr>
+        <tr><td class="n">18</td><td>מטריצת PUT / GET / DELETE</td><td>216 בדיקות ברצף: פודים 1→1024 × threads 1→32 × PUT, GET, DELETE × אובייקטים גדולים (1–4 MiB) וקטנים (3–4 KiB) בגודל רנדומלי. CSV אחד עם latency, clat, p50/p90/p99, latency מצד האחסון ו-CPU של הלקוח</td><td><span class="tag">6 × 6 × 3 × 2</span></td><td class="args">--treefile --treerand --lathisto --cpu</td></tr>
       </tbody>
     </table></div>
     <p>בבדיקות ה-IOPS (01, 02, 08, 09) כל PUT או GET של אובייקט שלם הוא סינכרוני, ו-<code>IODEPTH</code> לא משנה כלום: המקביליות היא <code>PODS × THREADS</code> בלבד. ב-throughput (03, 04, 16) <code>IODEPTH</code> כן עובד, כי החלקים של multipart והטווחים נשלחים במקביל. בדיקה 17, או בדיקה 12 עם <code>SWEEP_THREADS</code>, סורקות את מספר ה-threads.</p>
@@ -900,6 +901,15 @@ objects/thread = DATASET_SIZE / (OBJ_SIZE × PODS × THREADS)</pre></div>
       <div class="run"><h3>קריאות טווח כמו מנוע אנליטיקה <span class="why">קבצי Parquet של 512MB, footer ו-column chunks</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/s3/16-range-read.sh S3_ENDPOINT=http://minio.minio.svc:9000 S3_SECRET_NAME=s3-creds \
   PODS=8 THREADS=32 OBJ_SIZE=512m RANGE_BS="64k:1,1m:2,8m:1"</pre></div></div>
+
+      <div class="run"><h3>מטריצת PUT / GET / DELETE <span class="why">216 בדיקות ברצף ו-CSV אחד: כל תא (פודים × threads × גודל) כותב, קורא ומוחק את אותם אובייקטים פעם אחת. קודם תוכנית בלבד, אחר כך הריצה; ריצה שנקטעה ממשיכים עם MATRIX_RESUME</span></h3>
+<div class="code"><button class="copy" type="button">העתק</button><pre>E="S3_ENDPOINT=http://s3-1:9000,http://s3-2:9000 S3_SECRET_NAME=s3-creds"
+./benchmarks/s3/18-put-get-delete-matrix.sh $E MATRIX_PLAN=1     <span class="c"># רק התוכנית: אובייקטים ונפח לכל תא</span>
+./benchmarks/s3/18-put-get-delete-matrix.sh $E                   <span class="c"># 216 הבדיקות → results/matrix-&lt;תאריך&gt;.csv</span>
+./benchmarks/s3/18-put-get-delete-matrix.sh $E MATRIX_RESUME=matrix-20261123-101500   <span class="c"># המשך / הרצה חוזרת של תאים שנכשלו</span>
+<span class="c"># latency מצד האחסון מ-Prometheus (שמות המטריקות תלויים במערכת, ראה s3/README.md)</span>
+./benchmarks/s3/18-put-get-delete-matrix.sh $E PROM_URL=http://localhost:9090 \
+  PROM_Q_AVG='sum(increase(ceph_rgw_op_%op%_obj_lat_sum[%range%])) / sum(increase(ceph_rgw_op_%op%_obj_lat_count[%range%]))'</pre></div></div>
 
       <div class="run"><h3>AI Training על S3 <span class="why">cosmoflow, checkpoint של 16GB לפוד</span></h3>
 <div class="code"><button class="copy" type="button">העתק</button><pre>./benchmarks/s3/14-ai-training.sh S3_ENDPOINT=http://minio.minio.svc:9000 S3_SECRET_NAME=s3-creds \

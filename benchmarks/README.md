@@ -17,7 +17,7 @@ benchmarks/
 ├── nfs/  xfs/  raw-block/  s3/      one folder per protocol
 │   ├── README.md                    every test of the protocol with its defaults and commands
 │   ├── profile.env                  protocol defaults (nconnect, StorageClass, endpoint, ...)
-│   └── 01-write-iops.sh ... 17-find-max.sh       (tests that don't apply to a protocol are not there)
+│   └── 01-write-iops.sh ... 18-put-get-delete-matrix.sh   (tests that don't apply to a protocol are not there)
 ├── run-suite.sh                     run several tests in a row
 ├── compare.sh                       the same tests on two or more storage systems, side by side
 ├── deploy.sh                        only deploy the daemons, for elbencho runs by hand
@@ -146,7 +146,17 @@ See "Sweeps" below for all kinds.
 ./benchmarks/s3/16-range-read.sh    $S OBJ_SIZE=512m PODS=8
 ```
 
-### 9. elbencho by hand, without the test scripts
+### 9. S3 PUT / GET / DELETE matrix (test 18)
+```bash
+./benchmarks/s3/18-put-get-delete-matrix.sh $S MATRIX_PLAN=1        # objects and data of every cell, nothing runs
+./benchmarks/s3/18-put-get-delete-matrix.sh $S                      # 216 tests -> results/matrix-<date>.csv
+./benchmarks/s3/18-put-get-delete-matrix.sh $S MATRIX_RESUME=matrix-20261123-101500   # go on after an interruption
+```
+Pods `1 … 1024` × threads `1 … 32` × PUT / GET / DELETE × large (1–4 MiB) and small (3–4 KiB) objects of random
+size, one CSV row per test. Columns, sizes and the storage-side latency (Prometheus or your own command):
+[s3/README.md](s3/README.md#18--put--get--delete-matrix-216-tests-one-csv).
+
+### 10. elbencho by hand, without the test scripts
 ```bash
 ./benchmarks/deploy.sh raw-block $B PODS=auto       # only deploy: daemons on every node + controller pod
 kubectl -n elbencho-bench exec -it deploy/eb-blk-elbencho-ctl -- bash
@@ -164,7 +174,7 @@ elbencho --hosts "$ELBENCHO_HOSTS" -w --direct --rand -t 16 --iodepth 32 -b 4k -
 - Without the suite at all, the chart itself has `mode=standalone` (a shell pod), `mode=job` and a coordinator Job:
   see the main [README](../README.md).
 
-### 10. Long runs and cleanup
+### 11. Long runs and cleanup
 ```bash
 DETACH=1 ./benchmarks/raw-block/17-find-max.sh $B SWEEP_TEST=01   # default: survives a lost VPN/SSH connection
 ./benchmarks/cleanup.sh raw-block                          # remove deployments + volumes of a protocol
@@ -192,6 +202,7 @@ DETACH=1 ./benchmarks/raw-block/17-find-max.sh $B SWEEP_TEST=01   # default: sur
 | 15 | AI inference | NFS: model load at cold start + lookups + KV-cache offload (see below) | n/a | same on S3 |
 | 16 | Range reads | n/a | n/a | random byte-range GETs (`RANGE_BS`, default `64k:1,1m:2,8m:1`) at random offsets of large objects (`OBJ_SIZE`, 256m). This is the Parquet/ORC pattern of Trino/Spark |
 | 17 | Find max | load ladder on `SWEEP_TEST` (IODEPTH `1 … 128`, throughput `1 … 32`) that stops at the latency target, at saturation, or when the daemons run out of CPU | same | same, with a THREADS ladder (`8 … 256`) |
+| 18 | PUT / GET / DELETE matrix | n/a | n/a | 216 tests in a row: pods `1 4 16 64 256 1024` × threads `1 2 4 8 16 32` × PUT, GET, DELETE × objects of random size, large (1–4 MiB) and small (3–4 KiB). One CSV row per test with total and per-request (clat) latency, p50/p90/p99, storage-side latency and client CPU (see [s3/README.md](s3/README.md#18--put--get--delete-matrix-216-tests-one-csv)) |
 
 `compare.sh` runs any of these on two or more storage systems and prints them side by side.
 
@@ -315,7 +326,7 @@ These work well as they are; change them only for the reason in the last column.
 | `START_DELAY` | auto | seconds until the common start of two runs at once (S3 05-07, test 14 with `CKPT_MODE=async`); auto = 2 × the setup time from a dry run + 10 s | Only if the dry run itself is a problem; see "How the 70/30 mixes work" |
 | `WAIT_TIMEOUT` | 10m | how long to wait for the pods | Longer for slow image pulls or volume provisioning |
 | `RESULTS_DIR` | benchmarks/results | where results are written | |
-| `CONTINUE` | 0 | run-suite.sh: continue after a failed test | 1 for unattended suites |
+| `CONTINUE` | 0 (test 18: 1) | run-suite.sh and the S3 matrix (18): continue after a failed test / cell | 1 for unattended suites |
 | `PVC_SIZE` (nfs) | 500Gi | nominal size of the NFS volume | Never: NFS does not enforce it |
 
 ## Latency targets
