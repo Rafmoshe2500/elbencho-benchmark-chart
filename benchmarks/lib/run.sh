@@ -341,11 +341,11 @@ if [ "$TEST" = 18 ]; then
   sort -t, -k1,1n "$MATRIX_CSV" | awk 'NR == 1 || $0 !~ /^test_no,/' > "$MATRIX_CSV.tmp" && mv "$MATRIX_CSV.tmp" "$MATRIX_CSV"
   {
     awk -F, 'NR == 1 { for (i = 1; i <= NF; i++) h[$i] = i
-        printf "%-5s %-6s %-5s %5s %4s %10s %8s %9s %9s %9s %9s %9s %8s %5s  %s\n", "test", "op", "class", "pods", "thr", "ops/s", "MiB/s", "lat_avg", "lat_p50", "lat_p90", "lat_p99", "clat_p99", "stor_avg", "cpu%", "verdict"; next }
+        printf "%-5s %-6s %-5s %5s %4s %10s %8s %9s %9s %9s %9s %9s %9s %8s %5s  %s\n", "test", "op", "class", "pods", "thr", "ops/s", "MiB/s", "lat_avg", "lat_p50", "lat_p90", "lat_p99", "clat_p50", "clat_p99", "stor_avg", "cpu%", "verdict"; next }
       function f(k) { return ($(h[k]) == "") ? "-" : $(h[k]) }
-      { printf "%-5s %-6s %-5s %5s %4s %10s %8s %9s %9s %9s %9s %9s %8s %5s  %s\n", f("test_no"), f("operation"), f("size_class"), f("pods"),
+      { printf "%-5s %-6s %-5s %5s %4s %10s %8s %9s %9s %9s %9s %9s %9s %8s %5s  %s\n", f("test_no"), f("operation"), f("size_class"), f("pods"),
           f("threads_per_pod"), f("ops_per_s"), f("mib_per_s"), f("lat_avg_ms"), f("lat_p50_ms"), f("lat_p90_ms"), f("lat_p99_ms"),
-          f("clat_p99_ms"), f("storage_lat_avg_ms"), f("pod_cpu_busiest_pct"), f("verdict") }' "$MATRIX_CSV"
+          f("clat_p50_ms"), f("clat_p99_ms"), f("storage_lat_avg_ms"), f("pod_cpu_busiest_pct"), f("verdict") }' "$MATRIX_CSV"
     echo "(latencies in ms; cpu% = busiest load generator pod)"
     [ "$nfail" = 0 ] || echo "$nfail cell(s) failed: rerun only those with MATRIX_RESUME=$MATRIX_ID"
   } | tee "$RESULTS_DIR/$MATRIX_ID.txt"

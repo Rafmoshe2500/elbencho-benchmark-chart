@@ -258,8 +258,9 @@ pods stay deployed at the end (`./benchmarks/cleanup.sh s3`, or `KEEP=0`).
 | `verdict` | `ok`, `CLIENT-LIMITED` (the busiest pod used >= `CLIENT_CPU_MAX` % of its CPU: that row measures the load generators, not the storage), `failed` |
 | `start_utc`, `end_utc`, `run_dir` | when the phase ran, and its folder (elbencho result files with the full latency histograms) |
 
-p50 / p90 / p99 come from elbencho's latency histogram (`--lathisto`) the same way elbencho computes its own
-percentiles (upper bound of the histogram bucket); elbencho prints p50 and p99 itself but no p90.
+p50, p99 and p99.9 (`lat_*` and `clat_*`) are elbencho's own percentiles, as it prints them. elbencho prints no
+p90: that column comes from elbencho's latency histogram (`--lathisto`), computed the way elbencho computes its
+percentiles (upper bound of the histogram bucket; checked: the same method gives exactly elbencho's p50 / p99).
 
 **Latency on the storage side.** A client can only measure the time a request took including the network. The
 storage system's own view comes from its metrics, so it is optional:

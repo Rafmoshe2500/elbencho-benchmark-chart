@@ -214,13 +214,21 @@ matrix_rows() {
       function v(k) { return (k in h && $(h[k]) != "") ? $(h[k]) : "-" }
       /^[0-9]/ { print v("entries [last]"), v("time ms [last]"), v("CPU% [last]"), v("Ent lat us [min]"), v("Ent lat us [avg]"),
                        v("Ent lat us [max]"), v("IO lat us [min]"), v("IO lat us [avg]"), v("IO lat us [max]"); exit }' "$RUN_DIR/$ph.csv")
-    # p50 / p90 / p99 / p99.9 from the latency histograms (bucket upper bounds in us, the way elbencho computes
-    # its own percentiles): per object (Objects lat hist) and per request (IO lat hist)
+    # p50 / p90 / p99 / p99.9 in us, per object ("Objects ...") and per request ("IO ..."). p50, p99 and p99.9 are
+    # elbencho's own percentiles ("lat % us" line). elbencho prints no p90: it comes from the latency histogram
+    # ("lat hist", --lathisto), computed the way elbencho computes its percentiles (upper bound of the bucket);
+    # the histogram is also the fallback for the others
     pct=$(awk 'function pc(line, q,   b, n, i, kv, ub, c, tot, cum) { sub(/.*\[ */, "", line); sub(/ *\].*/, "", line)
           n = split(line, b, ", "); tot = 0; for (i = 1; i <= n; i++) { split(b[i], kv, ": "); ub[i] = kv[1]; c[i] = kv[2]; tot += c[i] }
-          if (tot == 0) return "-"; cum = 0; for (i = 1; i <= n; i++) { cum += c[i]; if (cum >= q / 100 * tot) return ub[i] } return ub[n] }
-      / lat hist / { k = ($1 == "IO") ? "io" : "ent"; r[k] = pc($0, 50) " " pc($0, 90) " " pc($0, 99) " " pc($0, 99.9) }
-      END { print ("ent" in r ? r["ent"] : "- - - -"), ("io" in r ? r["io"] : "- - - -") }' "$RUN_DIR/$ph.txt" 2>/dev/null || echo "- - - - - - - -")
+          if (tot == 0) return ""; cum = 0; for (i = 1; i <= n; i++) { cum += c[i]; if (cum >= q / 100 * tot) return ub[i] } return ub[n] }
+      function pp(line, q,   re) { re = q; gsub(/[.]/, "[.]", re)   # "99%<=9216" -> 9216 (q = 50, 99, 99.9)
+          if (match(line, " " re "%<=[0-9]+")) return substr(line, RSTART + length(q) + 4, RLENGTH - length(q) - 4); return "" }
+      function pick(a, b) { return (a != "") ? a : (b != "") ? b : "-" }
+      / lat % us / { k = ($1 == "IO") ? "io" : "ent"; e50[k] = pp($0, "50"); e99[k] = pp($0, "99"); e999[k] = pp($0, "99.9") }
+      / lat hist / { k = ($1 == "IO") ? "io" : "ent"; h50[k] = pc($0, 50); h90[k] = pc($0, 90); h99[k] = pc($0, 99); h999[k] = pc($0, 99.9) }
+      END { for (j = 1; j <= 2; j++) { k = (j == 1) ? "ent" : "io"
+              printf "%s%s %s %s %s", (j > 1 ? " " : ""), pick(e50[k], h50[k]), pick("", h90[k]), pick(e99[k], h99[k]), pick(e999[k], h999[k]) }
+            printf "\n" }' "$RUN_DIR/$ph.txt" 2>/dev/null || echo "- - - - - - - -")
     cpu=$(cat "$RUN_DIR/$ph.cpu" 2>/dev/null || echo "- - - - -")
     sl="- - - -"; storage_lat_on && sl=$(storage_lat "$op" "$st" "$en")
     # shellcheck disable=SC2086
@@ -245,9 +253,9 @@ matrix_rows() {
   echo "--- matrix rows (latencies in ms): $rows"
   awk -F, 'NR == 1 { for (i = 1; i <= NF; i++) h[$i] = i; next }
     function f(k) { return ($(h[k]) == "") ? "-" : $(h[k]) }
-    { printf "%-4s %-7s %-6s pods=%-5s threads=%-3s ops/s=%-10s MiB/s=%-8s lat avg/p50/p90/p99 %s/%s/%s/%s  clat p99 %s  storage avg %s  cpu %s%%  %s\n",
+    { printf "%-4s %-7s %-6s pods=%-5s threads=%-3s ops/s=%-10s MiB/s=%-8s lat avg/p50/p90/p99 %s/%s/%s/%s  clat p50/p99 %s/%s  storage avg %s  cpu %s%%  %s\n",
         f("test_no"), f("operation"), f("size_class"), f("pods"), f("threads_per_pod"), f("ops_per_s"), f("mib_per_s"), f("lat_avg_ms"),
-        f("lat_p50_ms"), f("lat_p90_ms"), f("lat_p99_ms"), f("clat_p99_ms"), f("storage_lat_avg_ms"), f("pod_cpu_busiest_pct"), f("verdict") }' "$rows"
+        f("lat_p50_ms"), f("lat_p90_ms"), f("lat_p99_ms"), f("clat_p50_ms"), f("clat_p99_ms"), f("storage_lat_avg_ms"), f("pod_cpu_busiest_pct"), f("verdict") }' "$rows"
 }
 
 post_summary() {
