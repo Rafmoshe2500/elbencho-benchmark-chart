@@ -715,6 +715,26 @@ the settings change, it restarts all daemons at once. If pods still do not becom
 By hand: `oc -n elbencho-bench get events --sort-by=.lastTimestamp | tail -20` and `oc -n elbencho-bench describe sts eb-nfs-elbencho`.
 `oc -n elbencho-bench delete pod -l app.kubernetes.io/name=elbencho` restarts all daemons at once.
 
+## Daemons not reachable (port 1611)
+
+elbencho runs in the controller pod and talks to every daemon over the pod network: port 1611, and 1612 for the
+second service instance (S3, NFS). No Route or LoadBalancer is involved, so these ports cannot be reached from
+outside the cluster: run elbencho by hand only in the controller pod (`deploy.sh` prints the command).
+
+After every deploy the runner asks each daemon port for `GET /status` from the controller pod (elbencho itself
+waits only 5 s and names just the first host it cannot reach). If one does not answer, the run stops with a table:
+
+| PROBLEM | Meaning |
+|---|---|
+| `dns` | The name does not resolve: the pod does not exist (`PODS` changed, an old controller pod), or cluster DNS fails |
+| `refused` | The pod is reachable but nothing listens: the elbencho container is restarting or crashed (see restarts and last exit, `OOMKilled` → raise `MEMORY`) |
+| `timeout` | Packets are dropped: a NetworkPolicy in the namespace, or a firewall between the controller's node and that pod's node. A pod is "Ready" when the kubelet on its own node reaches the port, so ready-but-timeout means the path between the nodes |
+| `noroute` | The pod network to that node is broken |
+
+By hand, in the controller pod: `timeout 5 bash -c 'exec 3<>/dev/tcp/eb-s3-elbencho-0.eb-s3-elbencho/1611' && echo open`.
+With `PODS=auto` the daemons run on every node (control plane and infra nodes too): if only those fail, use
+`NODE_SELECTOR` or `TOLERATE_ALL=0`.
+
 ## Caveats
 - **Stale dataset markers.** Datasets are prepared once and marked on the StatefulSet. If the data was deleted outside
   the suite (bucket emptied, export wiped), reads fail. Run once with `PREPARE=always`.

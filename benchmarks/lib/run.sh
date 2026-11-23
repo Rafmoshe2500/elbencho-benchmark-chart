@@ -573,6 +573,60 @@ restart_daemons_at_once() {
   fi
 }
 
+# Every elbencho service must answer the controller pod, which runs all elbencho commands. elbencho itself waits
+# only 5 s and names just the first host it cannot reach. This probe asks every daemon port (1611, and 1612 for
+# a second instance) for "GET /status" from the controller pod, all in parallel, and sorts the failures by
+# cause. A pod is "Ready" when the kubelet on its OWN node reaches the port, so ready-but-unreachable means
+# the network between the controller and that pod blocks it.
+HOST_PROBE='for h in ${ELBENCHO_HOSTS//,/ } ${ELBENCHO_HOSTS_2//,/ }; do
+  ( n=${h%:*}; p=${h##*:}
+    r=$(timeout 5 bash -c "exec 3<>/dev/tcp/$n/$p && printf \"GET /status HTTP/1.0\r\n\r\n\" >&3 && head -c 12 <&3" 2>&1); rc=$?
+    case "$r" in
+      "HTTP/1."?" 200") s=ok ;;
+      *"not known"*|*"name resolution"*|*"Unknown host"*) s=dns ;;
+      *refused*) s=refused ;;
+      *"No route"*|*unreachable*) s=noroute ;;
+      *) if [ $rc = 124 ]; then s=timeout; else s=other; fi ;;
+    esac
+    echo "$h $s $(echo $r | tr -d "\r" | head -c 120)" ) &
+done; wait'
+check_hosts() {
+  local out bad n nbad pod port base c info ctl_node
+  out=$(ctl "$HOST_PROBE" 2>/dev/null | sort) || true
+  [ -n "$out" ] || { warn "could not run the reachability check in the controller pod"; return 0; }
+  n=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
+  bad=$(printf '%s\n' "$out" | awk '$2 != "ok"')
+  if [ -z "$bad" ]; then log "all $n elbencho services answer the controller pod"; return 0; fi
+  nbad=$(printf '%s\n' "$bad" | wc -l | tr -d ' ')
+  base=$(printf '%s\n' "$out" | awk '{p=$1; sub(/.*:/,"",p); if (m=="" || p+0<m) m=p+0} END{print m}')   # 1st instance
+  ctl_node=$($K get pod -l "app.kubernetes.io/instance=$REL,app.kubernetes.io/component=controller" \
+    -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null || true)
+  {
+    echo "--- $nbad of $n elbencho services do not answer the controller pod (node ${ctl_node:-?}):"
+    printf '%-46s %-9s %-24s %-16s %s\n' SERVICE PROBLEM NODE POD-IP "CONTAINER (ready, restarts, last exit)"
+    while read -r h s _; do
+      pod=${h%%.*}; port=${h##*:}; c=elbencho   # containers: elbencho, elbencho-2 (port + 1)
+      [ "$port" != "$base" ] && c="elbencho-$((port - base + 1))"
+      info=$($K get pod "$pod" -o jsonpath="{.spec.nodeName} {.status.podIP} {range .status.containerStatuses[?(@.name=='$c')]}$c ready={.ready} restarts={.restartCount} {.lastState.terminated.reason}{end}" 2>/dev/null) \
+        || info="- - (pod $pod does not exist)"
+      # shellcheck disable=SC2086
+      set -- $info
+      printf '%-46s %-9s %-24s %-16s %s\n' "$h" "$s" "${1:--}" "${2:--}" "${*:3}"
+    done <<< "$bad"
+    echo "--- what the PROBLEM means:"
+    printf '%s\n' "$bad" | awk '{print $2}' | sort -u | while read -r s; do case $s in
+      dns)     echo "  dns      the name does not resolve: the pod does not exist (PODS changed, a stale controller pod) or cluster DNS fails" ;;
+      refused) echo "  refused  the pod is reachable, but nothing listens on the port: the elbencho container is (re)starting or crashed - see restarts / last exit (OOMKilled: raise MEMORY)" ;;
+      timeout) echo "  timeout  no answer within 5 s: packets are dropped - a NetworkPolicy in namespace $NAMESPACE, or a firewall between the controller's node and that node (compare the NODE column)" ;;
+      noroute) echo "  noroute  no route to the pod IP: the pod network between the nodes is broken for that node" ;;
+      *)       echo "  other    see the message: $(printf '%s\n' "$bad" | awk '$2=="other"{$1=$2="";print;exit}')" ;;
+    esac; done
+    echo "  By hand: $K get networkpolicy ; $K get pods -o wide ; and in the controller pod:"
+    echo "           timeout 5 bash -c 'exec 3<>/dev/tcp/<service>/1611' && echo open"
+  } >&2
+  die "$nbad of $n elbencho services are not reachable from the controller pod (see above)"
+}
+
 # xfs / raw-block: the volume size of a StatefulSet (volumeClaimTemplates) and of a PVC cannot shrink and in most
 # cases not grow in place. Existing volumes of the same StorageClass that are large enough are reused as they are;
 # otherwise the release and its volumes are removed and created again (the dataset is then prepared again).
@@ -611,6 +665,7 @@ deploy() {
     || { deploy_diag; die "the $PODS daemons did not become ready within $WAIT_TIMEOUT (see above)"; }
   $K rollout status "$CTL" --timeout "$WAIT_TIMEOUT" >/dev/null 2>&1 \
     || { deploy_diag; die "the controller pod did not become ready within $WAIT_TIMEOUT (see above)"; }
+  check_hosts
   if [ "$FAMILY" = file ] && [ -n "${EXPECT_FS:-}" ]; then
     local fs; fs=$($K exec "$FULL-0" -c elbencho -- stat -f -c %T /data 2>/dev/null || true)
     [ "$fs" = "$EXPECT_FS" ] || warn "/data in the pods is '$fs', expected '$EXPECT_FS' - check the StorageClass!"
