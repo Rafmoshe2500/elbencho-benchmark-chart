@@ -149,7 +149,8 @@ See "Sweeps" below for all kinds.
 ### 9. S3 PUT / GET / DELETE matrix (test 18)
 ```bash
 ./benchmarks/s3/18-put-get-delete-matrix.sh $S MATRIX_PLAN=1        # objects and data of every cell, nothing runs
-./benchmarks/s3/18-put-get-delete-matrix.sh $S                      # 216 tests -> results/matrix-<date>.csv
+./benchmarks/s3/18-put-get-delete-matrix.sh $S                      # 216 tests, 10 min each -> results/matrix-<date>.csv
+./benchmarks/s3/18-put-get-delete-matrix.sh $S MATRIX_MODE=count     # every object once per test instead of 10 min
 ./benchmarks/s3/18-put-get-delete-matrix.sh $S MATRIX_RESUME=matrix-20261123-101500   # go on after an interruption
 ```
 Pods `1 … 1024` × threads `1 … 32` × PUT / GET / DELETE × large (1–4 MiB) and small (3–4 KiB) objects of random
@@ -202,7 +203,7 @@ DETACH=1 ./benchmarks/raw-block/17-find-max.sh $B SWEEP_TEST=01   # default: sur
 | 15 | AI inference | NFS: model load at cold start + lookups + KV-cache offload (see below) | n/a | same on S3 |
 | 16 | Range reads | n/a | n/a | random byte-range GETs (`RANGE_BS`, default `64k:1,1m:2,8m:1`) at random offsets of large objects (`OBJ_SIZE`, 256m). This is the Parquet/ORC pattern of Trino/Spark |
 | 17 | Find max | load ladder on `SWEEP_TEST` (IODEPTH `1 … 128`, throughput `1 … 32`) that stops at the latency target, at saturation, or when the daemons run out of CPU | same | same, with a THREADS ladder (`8 … 256`) |
-| 18 | PUT / GET / DELETE matrix | n/a | n/a | 216 tests in a row: pods `1 4 16 64 256 1024` × threads `1 2 4 8 16 32` × PUT, GET, DELETE × objects of random size, large (1–4 MiB) and small (3–4 KiB). One CSV row per test with total and per-request (clat) latency, p50/p90/p99, storage-side latency and client CPU (see [s3/README.md](s3/README.md#18--put--get--delete-matrix-216-tests-one-csv)) |
+| 18 | PUT / GET / DELETE matrix | n/a | n/a | 216 tests in a row: pods `1 4 16 64 256 1024` × threads `1 2 4 8 16 32` × PUT, GET, DELETE × objects of random size, large (1–4 MiB) and small (3–4 KiB), 10 minutes each (`MATRIX_MODE=time`, `DURATION=600`) or every object once (`MATRIX_MODE=count`). One CSV row per test with total and per-request (clat) latency, p50/p90/p99, storage-side latency and client CPU (see [s3/README.md](s3/README.md#18--put--get--delete-matrix-216-tests-one-csv)) |
 
 `compare.sh` runs any of these on two or more storage systems and prints them side by side.
 
@@ -237,7 +238,7 @@ IODEPTH` (S3 IOPS tests: `PODS × THREADS`).
 | `BS` | 4k (IOPS), 1m (throughput) | block size per IO (S3: object size / part size) | Bigger blocks = fewer IOPS, more MiB/s, higher latency per IO. 4k shows the IO path, 1m+ the bandwidth |
 | `BS_MIX` | per test 05/06/07 | weighted sizes, e.g. `16k:2,64k:1` | Makes the mix look like a real application |
 | `READ_PCT` | 70 | read share in tests 05–07 | Higher = more reads; writes are usually the costlier side on flash with protection (RAID/EC/replication) |
-| `DURATION` | 300 (5 min, every test) | seconds per measured phase (every step of a sweep / find-max too) | Longer = steadier numbers; 1800 for flash steady state; shorter (60) for a quick look (garbage collection, write cache full) |
+| `DURATION` | 300 (5 min, every test; S3 matrix 18: 600) | seconds per measured phase (every step of a sweep / find-max too) | Longer = steadier numbers; 1800 for flash steady state; shorter (60) for a quick look (garbage collection, write cache full) |
 | `EXTRA_ARGS` | – | extra elbencho args for the measured phases (not the dataset prepare). The `phase '...': elbencho ...` log line shows the full command with them, ready to paste into the controller pod | Anything elbencho supports, e.g. `--lathisto`, `--s3fastput --cpu` |
 
 ### Latency targets

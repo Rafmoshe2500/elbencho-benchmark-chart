@@ -209,30 +209,46 @@ Runs every combination of
 | threads per pod | `1 2 4 8 16 32` | `MATRIX_THREADS="1 8 32"` |
 | object class | `large small` | `MATRIX_SIZES=small` |
 | operation | PUT, GET, DELETE | – |
+| length of every test | 10 minutes (`MATRIX_MODE=time`, `DURATION=600`) | `DURATION=300`, or `MATRIX_MODE=count` |
 
 = 6 × 6 × 2 cells × 3 operations = **216 tests in a row**, and writes one row per test to
 `benchmarks/results/matrix-<date>.csv` (plus a table in `matrix-<date>.txt`).
 
+**By time or by number of objects** (`MATRIX_MODE`):
+
+| | `time` (default) | `count` |
+|---|---|---|
+| PUT | overwrites the objects of the cell in a loop for `DURATION` s (the set is written once before, not measured) | writes every object once |
+| GET | reads the objects in a loop for `DURATION` s | reads every object once |
+| DELETE | deletes the set once, stops at `DURATION` s at the latest (what is left is then removed, not measured) | deletes every object once |
+| length | PUT and GET exactly `DURATION`; with the defaults ~24 h for all PUT + GET, up to 12 h more for DELETE | depends on the storage |
+
+DELETE cannot run in a loop: a deleted object is gone, and in S3 deleting a missing key returns success without
+doing anything, so repeating it would not measure deletes. To make DELETE run longer in time mode, give the cells
+more objects (`MATRIX_*_OBJS`, `MATRIX_*_MIN` below).
+
 **Objects.** `large` = objects of a random size between 1 MiB and 4 MiB (`MATRIX_LARGE=1m-4m`), `small` = between
 3 KiB and 4 KiB (`MATRIX_SMALL=3k-4k`), uniformly random per object. Every object is one S3 request, so the "block"
 is the object itself (multipart parts must be at least 5 MiB, so a 1–4 MiB block can only be a whole object).
-Every cell writes its own set of objects (PUT, each object once), reads all of them (GET, each once) and deletes
-all of them (DELETE, each once) under its own key prefix in the bucket `<BUCKET_PREFIX>-matrix`. The phases run
-until every object is done (no time limit), so the number of objects sets the length of a phase:
+Every cell works on its own set of objects under its own key prefix in the bucket `<BUCKET_PREFIX>-matrix`. The
+size of the set (in `count` mode it sets the length of a phase, in `time` mode how much data GET reads over and
+over and how many objects DELETE has):
 
 | | Objects per thread | At least (per cell) | At most (per cell) |
 |---|---|---|---|
 | large | `MATRIX_LARGE_OBJS=10` | `MATRIX_LARGE_MIN=500` | `MATRIX_LARGE_MAX=100000` |
 | small | `MATRIX_SMALL_OBJS=50` | `MATRIX_SMALL_MIN=5000` | `MATRIX_SMALL_MAX=300000` |
 
-and never less than one object per thread. With the defaults the whole matrix writes ~2.9 million objects,
-~1.4 TiB (each cell deletes its objects again; the largest cell holds ~244 GiB). `MATRIX_PLAN=1` prints the
-objects and data of every cell without running anything. The sizes come from an object list (elbencho custom tree
+and never less than one object per thread. With the defaults the sets of all cells are ~2.9 million objects,
+~1.4 TiB (each cell deletes its set again; the largest cell holds ~244 GiB). `MATRIX_PLAN=1` prints the objects
+and data of every cell and the expected time without running anything. The sizes come from an object list (elbencho custom tree
 mode) that elbencho uploads to every pod before a phase; at 1024 pods and 300,000 objects that is ~7 MiB per pod.
 
 ```bash
 ./benchmarks/s3/18-put-get-delete-matrix.sh $S MATRIX_PLAN=1                   # the plan only
-./benchmarks/s3/18-put-get-delete-matrix.sh $S                                 # all 216 tests
+./benchmarks/s3/18-put-get-delete-matrix.sh $S                                 # all 216 tests, 10 min each
+./benchmarks/s3/18-put-get-delete-matrix.sh $S DURATION=300                    # 5 min each
+./benchmarks/s3/18-put-get-delete-matrix.sh $S MATRIX_MODE=count               # every object once per test, no time limit
 ./benchmarks/s3/18-put-get-delete-matrix.sh $S MATRIX_PODS="1 4 16" MATRIX_THREADS="1 4 16"   # a smaller grid
 ./benchmarks/s3/18-put-get-delete-matrix.sh $S MATRIX_SMALL_OBJS=200 MATRIX_LARGE_MAX=20000   # longer small / shorter large phases
 ./benchmarks/s3/18-put-get-delete-matrix.sh $S MATRIX_RESUME=matrix-20261123-101500           # go on after an interruption
@@ -249,7 +265,8 @@ pods stay deployed at the end (`./benchmarks/cleanup.sh s3`, or `KEEP=0`).
 | Column | Meaning |
 |---|---|
 | `test_no`, `operation`, `size_class`, `object_size_range`, `pods`, `threads_per_pod`, `total_threads` | which test |
-| `objects`, `total_mib`, `avg_object_kib`, `elapsed_s`, `ops_per_s`, `mib_per_s` | work done and rate (all objects / time until the last thread finished) |
+| `run_mode`, `dataset_objects` | `time` / `count`, and the number of objects in the set of the cell |
+| `objects`, `total_mib`, `avg_object_kib`, `elapsed_s`, `ops_per_s`, `mib_per_s` | requests done (time mode: the loops counted, so more than the set), data, average object size of the set, duration and rate (until the last thread finished) |
 | `lat_avg/min/max_ms`, `lat_p50/p90/p99/p99_9_ms` | **total latency per object** as the application sees it (elbencho "Objects latency": the whole PUT / GET / DELETE of one object, client overhead included) |
 | `clat_avg/min/max_ms`, `clat_p50/p90/p99/p99_9_ms` | **completion latency per S3 request**: from sending the request until the response is complete (elbencho "IO latency"). With one request per object it is almost equal to `lat`; the difference is client-side work. DELETE is measured once per object: `clat = lat` |
 | `storage_lat_avg/p50/p90/p99_ms` | **latency measured by the storage system itself**, from its metrics (see below); empty if not configured |

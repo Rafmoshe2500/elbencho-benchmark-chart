@@ -233,6 +233,14 @@ fi
 : "${MATRIX_SMALL:=3k-4k}"        # object size range of the "small" class
 : "${MATRIX_LARGE_OBJS:=10}";  : "${MATRIX_LARGE_MIN:=500}";  : "${MATRIX_LARGE_MAX:=100000}"
 : "${MATRIX_SMALL_OBJS:=50}";  : "${MATRIX_SMALL_MIN:=5000}"; : "${MATRIX_SMALL_MAX:=300000}"
+# time  = PUT and GET loop over the object set for DURATION s each (default 600), DELETE removes the set (at most DURATION s)
+# count = every phase handles every object exactly once, as long as that takes
+: "${MATRIX_MODE:=time}"
+case "$MATRIX_MODE" in time|count) ;; *) die "MATRIX_MODE must be time or count, got '$MATRIX_MODE'" ;; esac
+if [[ $TEST == 18 || $TEST == pgd ]]; then
+  : "${DURATION:=600}"         # 10 min per measured run (the default DURATION of the other tests is 300)
+  [ "$DURATION" -ge 1 ] 2>/dev/null || die "DURATION must be seconds >= 1, got '$DURATION'"
+fi
 pgd_range() {   # pgd_range <large|small> -> "min max" object size in bytes
   local r lo hi
   case "$1" in large) r=$MATRIX_LARGE ;; small) r=$MATRIX_SMALL ;; *) die "object class must be large or small, got '$1'" ;; esac
@@ -258,7 +266,7 @@ pgd_objects() {   # pgd_objects <large|small> <pods> <threads> -> objects of the
 #   storage_lat_*  the storage system's own latency (STORAGE_LAT_CMD or Prometheus, see README); empty if not set
 #   client_cpu_util_pct  CPU use of the load generator nodes during the phase (elbencho --cpu, /proc/stat)
 #   pod_cpu_*  CPU the elbencho containers used themselves (cgroup counters, see cpu_end)
-MATRIX_HDR="test_no,matrix_id,operation,size_class,object_size_range,pods,threads_per_pod,total_threads,objects,total_mib,avg_object_kib,elapsed_s,ops_per_s,mib_per_s,lat_avg_ms,lat_min_ms,lat_max_ms,lat_p50_ms,lat_p90_ms,lat_p99_ms,lat_p99_9_ms,clat_avg_ms,clat_min_ms,clat_max_ms,clat_p50_ms,clat_p90_ms,clat_p99_ms,clat_p99_9_ms,storage_lat_avg_ms,storage_lat_p50_ms,storage_lat_p90_ms,storage_lat_p99_ms,client_cpu_util_pct,pod_cpu_avg_cores,pod_cpu_busiest_cores,pod_cpu_busiest_pct,pod_cpu_throttled_pct,verdict,start_utc,end_utc,run_dir"
+MATRIX_HDR="test_no,matrix_id,operation,size_class,object_size_range,pods,threads_per_pod,total_threads,run_mode,dataset_objects,objects,total_mib,avg_object_kib,elapsed_s,ops_per_s,mib_per_s,lat_avg_ms,lat_min_ms,lat_max_ms,lat_p50_ms,lat_p90_ms,lat_p99_ms,lat_p99_9_ms,clat_avg_ms,clat_min_ms,clat_max_ms,clat_p50_ms,clat_p90_ms,clat_p99_ms,clat_p99_9_ms,storage_lat_avg_ms,storage_lat_p50_ms,storage_lat_p90_ms,storage_lat_p99_ms,client_cpu_util_pct,pod_cpu_avg_cores,pod_cpu_busiest_cores,pod_cpu_busiest_pct,pod_cpu_throttled_pct,verdict,start_utc,end_utc,run_dir"
 matrix_row() {   # matrix_row key=value ... -> one CSV line in MATRIX_HDR order (missing keys stay empty)
   awk -v hdr="$MATRIX_HDR" 'BEGIN { for (i = 1; i < ARGC; i++) { k = ARGV[i]; sub(/=.*/, "", k); val[k] = substr(ARGV[i], length(k) + 2) }
     n = split(hdr, h, ","); for (i = 1; i <= n; i++) printf "%s%s", (i > 1 ? "," : ""), val[h[i]]; printf "\n" }' "$@"
@@ -285,9 +293,9 @@ if [ "$TEST" = 18 ]; then
     [ "${!v}" -ge 1 ] 2>/dev/null || die "$v must be a number >= 1, got '${!v}'"
   done
   MATRIX_CSV="$RESULTS_DIR/$MATRIX_ID.csv"
-  export MATRIX_LARGE MATRIX_SMALL MATRIX_LARGE_OBJS MATRIX_LARGE_MIN MATRIX_LARGE_MAX MATRIX_SMALL_OBJS MATRIX_SMALL_MIN MATRIX_SMALL_MAX
+  export MATRIX_MODE DURATION MATRIX_LARGE MATRIX_SMALL MATRIX_LARGE_OBJS MATRIX_LARGE_MIN MATRIX_LARGE_MAX MATRIX_SMALL_OBJS MATRIX_SMALL_MIN MATRIX_SMALL_MAX
   if [ -z "${MATRIX_RESUME:-}" ]; then
-    for v in MATRIX_PODS MATRIX_THREADS MATRIX_SIZES MATRIX_LARGE MATRIX_SMALL MATRIX_LARGE_OBJS MATRIX_LARGE_MIN \
+    for v in MATRIX_MODE DURATION MATRIX_PODS MATRIX_THREADS MATRIX_SIZES MATRIX_LARGE MATRIX_SMALL MATRIX_LARGE_OBJS MATRIX_LARGE_MIN \
              MATRIX_LARGE_MAX MATRIX_SMALL_OBJS MATRIX_SMALL_MIN MATRIX_SMALL_MAX; do printf '%s=%q\n' "$v" "${!v}"; done > "$RESULTS_DIR/$MATRIX_ID.grid"
     echo "$MATRIX_HDR" > "$MATRIX_CSV"
   fi
@@ -307,8 +315,18 @@ if [ "$TEST" = 18 ]; then
         n=$((n + 3))
       done
     done; done
-    echo "$total tests ($ncell cells x PUT / GET / DELETE): $tobj objects, $(hr "$tdata") written in total (each cell deletes its objects)."
+    if [ "$MATRIX_MODE" = time ]; then
+      echo "$total tests ($ncell cells x PUT / GET / DELETE). Object sets of all cells: $tobj objects, $(hr "$tdata") (each written once, then PUT overwrites it for ${DURATION}s; each cell deletes its set)."
+    else
+      echo "$total tests ($ncell cells x PUT / GET / DELETE): $tobj objects, $(hr "$tdata") written in total (each cell deletes its objects)."
+    fi
     echo "Sizes: large = $MATRIX_LARGE, small = $MATRIX_SMALL (uniformly random per object; one object = one request)."
+    if [ "$MATRIX_MODE" = time ]; then
+      echo "Mode time: PUT and GET run ${DURATION}s each, DELETE removes the objects of the cell (at most ${DURATION}s)."
+      echo "Measured time: $(awk -v c="$ncell" -v d="$DURATION" 'BEGIN { printf "%.1f h for PUT + GET, up to %.1f h more for DELETE", c * 2 * d / 3600, c * d / 3600 }') (+ writing each set once, deploys)."
+    else
+      echo "Mode count: every phase handles every object of its cell once; the time depends on the storage."
+    fi
   } | tee "$RESULTS_DIR/$MATRIX_ID.plan"
   [ "${MATRIX_PLAN:-0}" = 1 ] && { log "MATRIX_PLAN=1: plan only, nothing was run"; exit 0; }
   cell_rows() { awk -F, -v a="$1" 'NR > 1 && $1 > a && $1 <= a + 3' "$MATRIX_CSV"; }   # the 3 rows of the cell after test a
@@ -330,7 +348,7 @@ if [ "$TEST" = 18 ]; then
       k=$((k + 1))
       awk -F, -v x=$((base + k)) 'NR > 1 && $1 == x { f = 1 } END { exit !f }' "$MATRIX_CSV" && continue
       matrix_row test_no=$((base + k)) matrix_id="$MATRIX_ID" operation=$op size_class="$s" pods="$p" threads_per_pod="$t" \
-        object_size_range="$([ "$s" = large ] && echo "$MATRIX_LARGE" || echo "$MATRIX_SMALL")" total_threads=$((p * t)) verdict=failed >> "$MATRIX_CSV"
+        object_size_range="$([ "$s" = large ] && echo "$MATRIX_LARGE" || echo "$MATRIX_SMALL")" total_threads=$((p * t)) run_mode="$MATRIX_MODE" dataset_objects="$(pgd_objects "$s" "$p" "$t")" verdict=failed >> "$MATRIX_CSV"
     done
     if [ "$rc" != 0 ]; then
       nfail=$((nfail + 1)); warn "matrix: cell PODS=$p THREADS=$t $s failed (exit $rc)"
@@ -555,7 +573,7 @@ size_dataset() {
       03|04|16)             : "${DATASET_SIZE:=4t}" ;;
       pgd) local lo hi; read -r lo hi <<< "$(pgd_range "$OBJ_CLASS")"
            PGD_OBJECTS=$(pgd_objects "$OBJ_CLASS" "$PODS" "$THREADS")
-           log "dataset: $PGD_OBJECTS $OBJ_CLASS objects of $(hr "$lo") - $(hr "$hi") (random), ~$(hr $(( PGD_OBJECTS * (lo + hi) / 2 ))), $(( PGD_OBJECTS / (PODS * THREADS) )) per thread"
+           log "dataset: $PGD_OBJECTS $OBJ_CLASS objects of $(hr "$lo") - $(hr "$hi") (random), ~$(hr $(( PGD_OBJECTS * (lo + hi) / 2 ))), $(( PGD_OBJECTS / (PODS * THREADS) )) per thread; mode $MATRIX_MODE$([ "$MATRIX_MODE" = time ] && echo " (${DURATION}s per run)")"
            return 0 ;;
       *) return 0 ;;
     esac

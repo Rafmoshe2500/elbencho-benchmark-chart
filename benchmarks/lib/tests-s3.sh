@@ -111,11 +111,26 @@ pgd_test() {
   echo "PGD_BYTES=$PGD_BYTES" >> "$RUN_DIR/params.env"
   log "$PGD_OBJECTS objects, $(hr "$PGD_BYTES") in total (avg $(hr $(( PGD_BYTES / PGD_OBJECTS )))), prefix $bucket/$pfx"
   c=(-t "$THREADS" --treefile "$tree" --treerand -b "$hi" --s3objprefix "$pfx" --lathisto --cpu)
-  if ! eb put 1 ELBENCHO_HOSTS -w "${c[@]}" "$bucket"; then RUN_FAILED=put
-  elif ! eb get 1 ELBENCHO_HOSTS -r --s3fastget "${c[@]}" "$bucket"; then RUN_FAILED=get
-  elif ! eb delete 1 ELBENCHO_HOSTS -F "${c[@]}" "$bucket"; then RUN_FAILED=delete; fi
-  if [ -n "$RUN_FAILED" ]; then
-    warn "phase '$RUN_FAILED' failed: removing the objects of this cell (not measured)"
+  local tp=() td=() left=0 done_n
+  if [ "$MATRIX_MODE" = time ]; then
+    # PUT and GET loop over the object set for DURATION s; the set is written once before (not measured), so that
+    # every object exists for GET. DELETE cannot loop (a deleted object is gone, and deleting a missing key
+    # "succeeds" in S3 without work): it deletes the set once, with DURATION as the upper limit.
+    tp=(--timelimit "$DURATION" --infloop); td=(--timelimit "$DURATION")
+    log "time mode: PUT and GET run ${DURATION}s each, DELETE removes the $PGD_OBJECTS objects (at most ${DURATION}s)"
+    eb prepare 0 ELBENCHO_HOSTS -w "${c[@]}" "$bucket" || RUN_FAILED=put
+  fi
+  if [ -n "$RUN_FAILED" ]; then :
+  elif ! eb put 1 ELBENCHO_HOSTS -w "${c[@]}" ${tp[@]+"${tp[@]}"} "$bucket"; then RUN_FAILED=put
+  elif ! eb get 1 ELBENCHO_HOSTS -r --s3fastget "${c[@]}" ${tp[@]+"${tp[@]}"} "$bucket"; then RUN_FAILED=get
+  elif ! eb delete 1 ELBENCHO_HOSTS -F "${c[@]}" ${td[@]+"${td[@]}"} "$bucket"; then RUN_FAILED=delete
+  elif [ "$MATRIX_MODE" = time ]; then   # DELETE stopped by the time limit: the rest is removed below
+    done_n=$(ctl "cat $REMOTE_DIR/delete.csv" 2>/dev/null | awk -F, 'NR == 1 { for (i = 1; i <= NF; i++) h[$i] = i; next } /^[0-9]/ { print $(h["entries [last]"]); exit }')
+    [ "${done_n:-0}" -ge "$PGD_OBJECTS" ] 2>/dev/null || { left=1; log "DELETE reached the ${DURATION}s limit after ${done_n:-?} of $PGD_OBJECTS objects"; }
+  fi
+  if [ -n "$RUN_FAILED" ] || [ "$left" = 1 ]; then
+    [ -n "$RUN_FAILED" ] && warn "phase '$RUN_FAILED' failed"
+    log "removing the remaining objects of this cell (not measured)"
     eb cleanup 0 ELBENCHO_HOSTS -F --nodelerr -t "$THREADS" --treefile "$tree" -b "$hi" --s3objprefix "$pfx" "$bucket" \
       || warn "cleanup failed: objects under $bucket/$pfx stay (remove them with your S3 tools)"
     ctl "rm -f $REMOTE_DIR/cleanup.csv $REMOTE_DIR/cleanup.txt" || true   # not a result
@@ -206,14 +221,15 @@ matrix_rows() {
   for ph in put get delete; do
     i=$((i + 1)); op=$(echo "$ph" | tr 'a-z' 'A-Z'); w="WIN_$ph"; w=${!w}
     set -- test_no=$(( ${MATRIX_SEQ:-0} + i )) matrix_id="${MATRIX_ID:-}" operation="$op" size_class="$OBJ_CLASS" \
-      object_size_range="$rng" pods="$PODS" threads_per_pod="$THREADS" total_threads=$((PODS * THREADS)) run_dir="$RUN_DIR"
+      object_size_range="$rng" pods="$PODS" threads_per_pod="$THREADS" total_threads=$((PODS * THREADS)) run_mode="$MATRIX_MODE" \
+      dataset_objects="$PGD_OBJECTS" run_dir="$RUN_DIR"
     if [ -z "$w" ] || [ "$ph" = "$RUN_FAILED" ]; then matrix_row "$@" verdict=failed >> "$rows"; continue; fi
     st=${w% *}; en=${w#* }
-    # elbencho csv: objects, elapsed, client cpu, latency min/avg/max (per object and per request)
+    # elbencho csv: objects done, elapsed, client cpu, latency min/avg/max (per object and per request), MiB done
     vals=$(awk -F, 'NR == 1 { for (i = 1; i <= NF; i++) h[$i] = i; next }
       function v(k) { return (k in h && $(h[k]) != "") ? $(h[k]) : "-" }
       /^[0-9]/ { print v("entries [last]"), v("time ms [last]"), v("CPU% [last]"), v("Ent lat us [min]"), v("Ent lat us [avg]"),
-                       v("Ent lat us [max]"), v("IO lat us [min]"), v("IO lat us [avg]"), v("IO lat us [max]"); exit }' "$RUN_DIR/$ph.csv")
+                       v("Ent lat us [max]"), v("IO lat us [min]"), v("IO lat us [avg]"), v("IO lat us [max]"), v("MiB [last]"); exit }' "$RUN_DIR/$ph.csv")
     # p50 / p90 / p99 / p99.9 in us, per object ("Objects ...") and per request ("IO ..."). p50, p99 and p99.9 are
     # elbencho's own percentiles ("lat % us" line). elbencho prints no p90: it comes from the latency histogram
     # ("lat hist", --lathisto), computed the way elbencho computes its percentiles (upper bound of the bucket);
@@ -232,13 +248,16 @@ matrix_rows() {
     cpu=$(cat "$RUN_DIR/$ph.cpu" 2>/dev/null || echo "- - - - -")
     sl="- - - -"; storage_lat_on && sl=$(storage_lat "$op" "$st" "$en")
     # shellcheck disable=SC2086
-    matrix_row "$@" $(awk -v op="$op" -v b="${PGD_BYTES:-0}" -v st="$st" -v en="$en" -v vals="$vals" -v pct="$pct" -v cpu="$cpu" -v sl="$sl" \
+    matrix_row "$@" $(awk -v op="$op" -v b="${PGD_BYTES:-0}" -v nset="$PGD_OBJECTS" -v mode="$MATRIX_MODE" -v st="$st" -v en="$en" -v vals="$vals" -v pct="$pct" -v cpu="$cpu" -v sl="$sl" \
         -v cmax="$CLIENT_CPU_MAX" "$AWK_TIME"'
       function ms(x) { return (x == "-" || x == "") ? "" : sprintf("%.3f", x / 1000) }
       function n(x) { return (x == "-" || x == "") ? "" : x }
       BEGIN { split(vals, v, " "); split(pct, p, " "); split(cpu, c, " "); split(sl, s, " ")
-        obj = v[1]; el = v[2] / 1000; mib = b / 1048576
-        printf "objects=%s total_mib=%.1f avg_object_kib=%.1f elapsed_s=%.3f ", obj, mib, (obj > 0 ? b / obj / 1024 : 0), el
+        # objects / MiB actually done: count mode = the set once; time mode = what elbencho counted (repeats included).
+        # DELETE moves no data: its MiB = deleted objects x the average object size of the set
+        obj = v[1]; el = v[2] / 1000; avg = (nset > 0) ? b / nset : 0
+        if (op == "DELETE") mib = obj * avg / 1048576; else if (mode == "time" && v[10] != "-") mib = v[10]; else mib = b / 1048576
+        printf "objects=%s total_mib=%.1f avg_object_kib=%.1f elapsed_s=%.3f ", obj, mib, avg / 1024, el
         if (el > 0) { printf "ops_per_s=%.1f ", obj / el; if (op != "DELETE") printf "mib_per_s=%.1f ", mib / el }
         printf "lat_min_ms=%s lat_avg_ms=%s lat_max_ms=%s ", ms(v[4]), ms(v[5]), ms(v[6])
         printf "lat_p50_ms=%s lat_p90_ms=%s lat_p99_ms=%s lat_p99_9_ms=%s ", ms(p[1]), ms(p[2]), ms(p[3]), ms(p[4])
