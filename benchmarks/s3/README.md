@@ -227,6 +227,13 @@ DELETE cannot run in a loop: a deleted object is gone, and in S3 deleting a miss
 doing anything, so repeating it would not measure deletes. To make DELETE run longer in time mode, give the cells
 more objects (`MATRIX_*_OBJS`, `MATRIX_*_MIN` below).
 
+Timing as measured with elbencho 3.3-3: a timed PUT / GET ends about 1 s after `DURATION` (600 s -> ~601 s).
+DELETE checks the limit only after a batch of deletes per thread (128-256 were seen), so it can run past
+`DURATION` by that many deletes per thread; its counts and latencies stay correct (`elapsed_s` is the real time).
+The whole matrix without DELETE: 144 x ~601 s = ~24 h, plus writing each cell's set once (with the defaults
+~1.37 TiB of large objects and ~2.3 million small ones, at the storage's write speed) and ~0.5-1.5 min per cell for
+deploy checks, CPU sampling, elbencho setup and fetching results (an estimate; 72 cells -> ~0.5-2 h).
+
 **Objects.** `large` = objects of a random size between 1 MiB and 4 MiB (`MATRIX_LARGE=1m-4m`), `small` = between
 3 KiB and 4 KiB (`MATRIX_SMALL=3k-4k`), uniformly random per object. Every object is one S3 request, so the "block"
 is the object itself (multipart parts must be at least 5 MiB, so a 1–4 MiB block can only be a whole object).
